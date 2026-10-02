@@ -628,102 +628,6 @@ UserInputService.JumpRequest:Connect(function()
     end
 end)
 
---=============================================================
--- CLICK TELEPORT
---=============================================================
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if not CONFIG.ClickTP then return end
-    if input.UserInputType == Enum.UserInputType.MouseButton1
-    or input.UserInputType == Enum.UserInputType.Touch then
-        local char = LocalPlayer.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        if not hrp then return end
-        local ray = Camera:ScreenPointToRay(input.Position.X, input.Position.Y)
-        local params = RaycastParams.new()
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = { char }
-        local result = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
-        if result then
-            hrp.CFrame = CFrame.new(result.Position + Vector3.new(0, 3.5, 0))
-        end
-    end
-end)
-
---=============================================================
--- FLING
---=============================================================
-local function flingPlayer(player)
-    local char = LocalPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    local tHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-    if not tHrp then return end
-
-    local delta = tHrp.Position - hrp.Position
-    local dir = delta.Magnitude > 0.1 and delta.Unit or Vector3.new(0, 1, 0)
-    tHrp.AssemblyLinearVelocity = dir * CONFIG.FlingPower + Vector3.new(0, CONFIG.FlingLift, 0)
-
-    local spin = Instance.new("BodyAngularVelocity")
-    spin.AngularVelocity = Vector3.new(
-        math.random(-100, 100),
-        math.random(-100, 100),
-        math.random(-100, 100)
-    ) * (CONFIG.FlingSpin / 100)
-    spin.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
-    spin.P = 100000
-    spin.Parent = tHrp
-    Debris:AddItem(spin, 0.4)
-end
-
-local function countTargets()
-    local n = 0
-    for p in pairs(targetPlayers) do
-        if p.Parent then n = n + 1 end
-    end
-    return n
-end
-
-local function flingNearbyPlayers()
-    if not CONFIG.FlingEnabled then return end
-    local now = tick()
-    if now - lastFling < CONFIG.FlingCooldown then return end
-
-    local char = LocalPlayer.Character
-    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-    lastFling = now
-
-    if countTargets() > 0 then
-        for p in pairs(targetPlayers) do
-            if p.Parent and p ~= LocalPlayer then
-                flingPlayer(p)
-            end
-        end
-        return
-    end
-
-    local origin  = hrp.Position
-    local rangeSq = CONFIG.FlingRange * CONFIG.FlingRange
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            local tHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
-            if tHrp then
-                local d = tHrp.Position - origin
-                if d.Magnitude * d.Magnitude <= rangeSq then
-                    flingPlayer(player)
-                end
-            end
-        end
-    end
-end
-
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.KeyCode == CONFIG.FlingKey then
-        flingNearbyPlayers()
-    end
-end)
 
 --=============================================================
 -- ANTI-KICK
@@ -1157,10 +1061,8 @@ local function buildGUI()
     local espPage    = makePage()
     local movePage   = makePage()
     local combatPage = makePage()
-    local flingPage  = makePage()
-    local targetPage = makePage()
     local miscPage   = makePage()
-    local pages = { espPage, movePage, combatPage, flingPage, targetPage, miscPage }
+    local pages = { espPage, movePage, combatPage, miscPage }
     local tabs  = {}
 
     local function makeTab(label, order, page, defaultOn)
@@ -1193,8 +1095,6 @@ local function buildGUI()
     makeTab("ESP",    1, espPage,    true)
     makeTab("MOVE",   2, movePage,   false)
     makeTab("COMBAT", 3, combatPage, false)
-    makeTab("FLING",  4, flingPage,  false)
-    makeTab("TARG",   5, targetPage, false)
     makeTab("MISC",   6, miscPage,   false)
 
     local function makeRow(parent, label, order, getter, setter)
@@ -1379,112 +1279,6 @@ local function buildGUI()
             end
         end)
 
-    --==== FLING ====--
-    makeRow(flingPage, "Fling Enabled", 1,
-        function() return CONFIG.FlingEnabled end,
-        function(v) CONFIG.FlingEnabled = v end)
-    makeSlider(flingPage, "Fling Range", 2, 5, 100, 5,
-        function() return CONFIG.FlingRange end,
-        function(v) CONFIG.FlingRange = v end)
-    makeSlider(flingPage, "Fling Power", 3, 100, 1500, 50,
-        function() return CONFIG.FlingPower end,
-        function(v) CONFIG.FlingPower = v end)
-    makeSlider(flingPage, "Fling Lift", 4, 0, 800, 40,
-        function() return CONFIG.FlingLift end,
-        function(v) CONFIG.FlingLift = v end)
-    makeSlider(flingPage, "Fling Spin", 5, 0, 500, 20,
-        function() return CONFIG.FlingSpin end,
-        function(v) CONFIG.FlingSpin = v end)
-    makeActionRow(flingPage, "TRIGGER FLING  [" .. CONFIG.FlingKey.Name .. "]", 6, flingNearbyPlayers)
-
-    --==== TARGET ====--
-    refreshTargetList = function()
-        for _, r in pairs(targetListRows) do r:Destroy() end
-        targetListRows = {}
-
-        local hdr = make("Frame", {
-            Size = UDim2.new(1, 0, 0, 26),
-            BackgroundColor3 = CONFIG.Bg2,
-            BorderSizePixel = 0, LayoutOrder = 0,
-        }, targetPage)
-        make("TextLabel", {
-            Size = UDim2.new(1, -80, 1, 0),
-            Position = UDim2.new(0, 10, 0, 0),
-            BackgroundTransparency = 1,
-            Font = Enum.Font.GothamBold, TextSize = 11,
-            TextColor3 = CONFIG.AccentBright,
-            TextXAlignment = Enum.TextXAlignment.Left,
-            Text = "TARGETS: " .. tostring(countTargets()),
-            ZIndex = 4,
-        }, hdr)
-        local clearAll = make("TextButton", {
-            Size = UDim2.new(0, 60, 0, 20),
-            Position = UDim2.new(1, -66, 0, 3),
-            BackgroundColor3 = CONFIG.Bg1,
-            BorderSizePixel = 0,
-            Font = Enum.Font.GothamBold, TextSize = 10,
-            TextColor3 = CONFIG.TextDim,
-            Text = "CLEAR ALL",
-            AutoButtonColor = false, ZIndex = 5,
-        }, hdr)
-        clearAll.MouseButton1Click:Connect(function()
-            targetPlayers = {}
-            refreshTargetList()
-        end)
-        table.insert(targetListRows, hdr)
-
-        local order = 1
-        for _, p in ipairs(Players:GetPlayers()) do
-            if p == LocalPlayer then continue end
-            local isTarget = targetPlayers[p] == true
-            local row = make("Frame", {
-                Size = UDim2.new(1, 0, 0, 26),
-                BackgroundColor3 = isTarget and CONFIG.AccentDim or CONFIG.Bg1,
-                BorderSizePixel = 0, LayoutOrder = order,
-            }, targetPage)
-            order = order + 1
-            make("TextLabel", {
-                Size = UDim2.new(1, -70, 1, 0),
-                Position = UDim2.new(0, 10, 0, 0),
-                BackgroundTransparency = 1,
-                Font = Enum.Font.Gotham, TextSize = 12,
-                TextColor3 = isTarget and CONFIG.AccentBright or CONFIG.Text,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                Text = p.Name, ZIndex = 4,
-            }, row)
-            local btn = make("TextButton", {
-                Size = UDim2.new(0, 56, 0, 20),
-                Position = UDim2.new(1, -60, 0, 3),
-                BackgroundColor3 = isTarget and CONFIG.Accent or CONFIG.Bg2,
-                BorderSizePixel = 0,
-                Font = Enum.Font.GothamBold, TextSize = 10,
-                TextColor3 = isTarget and Color3.new(1,1,1) or CONFIG.Text,
-                Text = isTarget and "UNTARGET" or "TARGET",
-                AutoButtonColor = false, ZIndex = 5,
-            }, row)
-            btn.MouseButton1Click:Connect(function()
-                if targetPlayers[p] then
-                    targetPlayers[p] = nil
-                else
-                    targetPlayers[p] = true
-                end
-                refreshTargetList()
-            end)
-            table.insert(targetListRows, row)
-        end
-        if #targetListRows <= 1 then
-            local lbl = make("TextLabel", {
-                Size = UDim2.new(1, 0, 0, 30),
-                BackgroundTransparency = 1,
-                Font = Enum.Font.Gotham, TextSize = 11,
-                TextColor3 = CONFIG.TextDim,
-                Text = "No other players online",
-                LayoutOrder = 2, ZIndex = 4,
-            }, targetPage)
-            table.insert(targetListRows, lbl)
-        end
-    end
-    refreshTargetList()
 
     --==== MISC ====--
     makeRow(miscPage, "Admin Alert",     1, function() return CONFIG.ShowAdmins  end, function(v) CONFIG.ShowAdmins = v  end)
