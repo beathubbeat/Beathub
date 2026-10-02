@@ -1,42 +1,61 @@
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
-local CoreGui = game:GetService("CoreGui")
+local Debris            = game:GetService("Debris")
+local CoreGui           = game:GetService("CoreGui")
+local TeleportService   = game:GetService("TeleportService")
+local HttpService       = game:GetService("HttpService")
+local Lighting          = game:GetService("Lighting")
+local VirtualUser       = game:GetService("VirtualUser")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
+local Camera      = workspace.CurrentCamera
 
+local newcclosure = newcclosure or function(f) return f end
+
+--=============================================================
+-- CONFIG
+--=============================================================
 local CONFIG = {
-    Enabled = true,
-    ShowName = true,
+    Enabled    = true,
+    ShowName   = true,
     ShowHealth = true,
-    ShowTool = true,
-    ShowArmor = true,
+    ShowTool   = true,
+    ShowArmor  = true,
     ShowAdmins = true,
-    ShowTracers = false,
-    ShowRadar = true,
+    ShowRadar  = true,
+    ShowBoxes  = false,
+    ShowFPS    = true,
 
-    Noclip = false,
+    Noclip          = false,
     MountainClimber = false,
-    WallClimber = false,
-    WalkSpeed = 16,
+    WallClimber     = false,
+    WalkSpeed       = 16,
+    JumpPower       = 50,
+    Gravity         = 196.2,
+    InfiniteJump    = false,
+    BunnyHop        = false,
 
-    ShowAimIndicator = true,
-    ShowRangeRing    = true,
-    ShowTrajectory   = true,
-    ShowProjectiles  = true,
+    -- Hitbox widener
+    HitboxEnabled  = false,
+    HitboxSize     = 6,        -- studs (X, Y, Z each)
+    HitboxTransparency = 0.7,
+    HitboxTeamCheck = false,   -- only enlarge enemies (not teammates)
 
-    AimLineLength   = 6,
-    RangeRingRadius = 50,
-    RangeRingSteps  = 24,
-    TrajectorySpeed = 90,
-    TrajectorySteps = 20,
-    TrajectoryDt    = 0.08,
+    FlingEnabled  = true,
+    FlingKey      = Enum.KeyCode.F,
+    FlingRange    = 30,
+    FlingPower    = 420,
+    FlingLift     = 220,
+    FlingSpin     = 160,
+    FlingCooldown = 0.35,
 
-    ProjectileSpeedMin = 55,
-    ProjectileMaxLife  = 4,
-    ProjectileMaxCount = 25,
+    AntiKick  = false,
+    AntiFling = false,
+    AntiAFK   = true,
+    ClickTP   = false,
+    Fullbright = false,
 
     HeavyUpdateHz = 30,
     ToolRefreshHz = 2,
@@ -47,27 +66,22 @@ local CONFIG = {
     Bg           = Color3.fromRGB(8, 8, 10),
     Bg1          = Color3.fromRGB(16, 16, 18),
     Bg2          = Color3.fromRGB(24, 24, 28),
-    Line         = Color3.fromRGB(50, 50, 55),
     Text         = Color3.fromRGB(230, 230, 230),
     TextDim      = Color3.fromRGB(120, 120, 125),
 
-    NameColor    = Color3.fromRGB(255, 255, 255),
-    HealthColor  = Color3.fromRGB(255, 255, 255),
-    ToolColor    = Color3.fromRGB(255, 200, 80),
-    ArmorColor   = Color3.fromRGB(200, 200, 210),
-    AdminColor   = Color3.fromRGB(255, 60, 60),
-    AimColor     = Color3.fromRGB(255, 120, 120),
-    RangeColor   = Color3.fromRGB(255, 60, 60),
-    TrajColor    = Color3.fromRGB(255, 180, 60),
-    ProjColor    = Color3.fromRGB(255, 100, 100),
+    NameColor   = Color3.fromRGB(255, 255, 255),
+    HealthColor = Color3.fromRGB(255, 255, 255),
+    ToolColor   = Color3.fromRGB(255, 200, 80),
+    ArmorColor  = Color3.fromRGB(200, 200, 210),
+    AdminColor  = Color3.fromRGB(255, 60, 60),
+    BoxColor    = Color3.fromRGB(255, 90, 90),
+    HitboxColor = Color3.fromRGB(255, 120, 120),
 
     NameSize   = 11,
     HealthSize = 11,
     ToolSize   = 10,
     ArmorSize  = 10,
     AdminSize  = 11,
-    TracerThick = 1,
-    AimThick    = 1,
 
     MaxDistance = 1500,
     RadarSize   = 170,
@@ -75,18 +89,102 @@ local CONFIG = {
     GuiKey      = Enum.KeyCode.RightShift,
 }
 
+--=============================================================
+-- STATE
+--=============================================================
 local espData, armorCache, adminCache = {}, {}, {}
 local toolCache = {}
 local radarDots = {}
 local radarState = { center = Vector2.new(0,0), half = 0 }
 local guiRefs = {}
 
-local rangeRingLines = {}
-local trajDots = {}
-local projectiles = {}
-local projectileCount = 0
 local heavyAccum = 0
+local lastFling  = 0
 
+local targetPlayers  = {}
+local targetListRows = {}
+local refreshTargetList = function() end
+
+local savedLighting = nil
+local fpsFrames, fpsTimeAccum, fpsValue = 0, 0, 0
+
+-- Hitbox state: [player] = { part = BasePart, originalSize = Vector3, originalTransparency = number }
+local hitboxes = {}
+
+-- FPS overlay
+local fpsText = Drawing.new("Text")
+fpsText.Size = 14
+fpsText.Color = Color3.new(1, 1, 1)
+fpsText.Outline = true
+fpsText.OutlineColor = Color3.new(0, 0, 0)
+fpsText.Position = Vector2.new(10, 8)
+fpsText.Visible = false
+fpsText.Text = "FPS: --  |  Ping: --"
+
+--=============================================================
+-- NOTIFY
+--=============================================================
+local function notify(msg)
+    print("[BeatHub] " .. msg)
+    if guiRefs.toast then
+        guiRefs.toast.Text = msg
+        guiRefs.toast.Visible = true
+        local token = tick()
+        guiRefs.toastToken = token
+        task.delay(2.5, function()
+            if guiRefs.toast and guiRefs.toastToken == token then
+                guiRefs.toast.Visible = false
+            end
+        end)
+    end
+end
+
+--=============================================================
+-- HTTP HELPER
+--=============================================================
+local function httpGet(url)
+    local fn
+    if syn and syn.request then fn = syn.request
+    elseif http_request then fn = http_request
+    elseif request then fn = request
+    end
+    if fn then
+        local ok, res = pcall(fn, { Url = url, Method = "GET" })
+        if ok and res and res.Body then return res.Body end
+    end
+    if game.HttpGet then
+        local ok, body = pcall(function() return game:HttpGet(url) end)
+        if ok and body then return body end
+    end
+    local ok, body = pcall(function() return HttpService:GetAsync(url) end)
+    if ok then return body end
+    return nil
+end
+
+local function toProxyUrl(url)
+    return (url:gsub("([%w%-]+)%.roblox%.com", "%1.roproxy.com"))
+end
+
+local function httpGetJson(url)
+    local body = httpGet(url)
+    if body then
+        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if ok and data then return data end
+    end
+    local proxied = toProxyUrl(url)
+    if proxied ~= url then
+        body = httpGet(proxied)
+        if body then
+            local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if ok and data then return data end
+        end
+    end
+    return nil
+end
+
+--=============================================================
+-- DRAWING HELPERS
+--=============================================================
 local function newText(c, s)
     local t = Drawing.new("Text")
     t.Color, t.Size = c, s
@@ -96,13 +194,6 @@ local function newText(c, s)
     return t
 end
 
-local function newLine(c, th)
-    local l = Drawing.new("Line")
-    l.Color, l.Thickness = c, th
-    l.Transparency, l.Visible = 0.85, false
-    return l
-end
-
 local function newSquare(c, s, f)
     local sq = Drawing.new("Square")
     sq.Color, sq.Size, sq.Filled = c, s, f
@@ -110,18 +201,20 @@ local function newSquare(c, s, f)
     return sq
 end
 
-local function setVisible(obj, v)
-    if obj.Visible ~= v then obj.Visible = v end
+local function newLine(c, th)
+    local l = Drawing.new("Line")
+    l.Color, l.Thickness = c, th
+    l.Transparency, l.Visible = 0.85, false
+    return l
 end
 
-local function setPos(obj, p)
-    if obj.Position ~= p then obj.Position = p end
-end
+local function setVisible(obj, v) if obj.Visible ~= v then obj.Visible = v end end
+local function setPos(obj, p)     if obj.Position ~= p then obj.Position = p end end
+local function setText(obj, t)    if obj.Text ~= t then obj.Text = t end end
 
-local function setText(obj, t)
-    if obj.Text ~= t then obj.Text = t end
-end
-
+--=============================================================
+-- ARMOR / ADMIN
+--=============================================================
 local function summarizeArmor(character)
     local seen, sets = {}, {}
     for _, d in ipairs(character:GetDescendants()) do
@@ -164,16 +257,18 @@ local function isAdmin(player, character)
     return parts > 0 and allInv
 end
 
+--=============================================================
+-- ESP
+--=============================================================
 local function createESP(player)
     if player == LocalPlayer or espData[player] then return end
     espData[player] = {
-        admin   = newText(CONFIG.AdminColor,  CONFIG.AdminSize),
-        name    = newText(CONFIG.NameColor,   CONFIG.NameSize),
-        health  = newText(CONFIG.HealthColor, CONFIG.HealthSize),
-        tool    = newText(CONFIG.ToolColor,   CONFIG.ToolSize),
-        armor   = newText(CONFIG.ArmorColor,  CONFIG.ArmorSize),
-        tracer  = newLine(CONFIG.Accent,      CONFIG.TracerThick),
-        aim     = newLine(CONFIG.AimColor,    CONFIG.AimThick),
+        admin  = newText(CONFIG.AdminColor,  CONFIG.AdminSize),
+        name   = newText(CONFIG.NameColor,   CONFIG.NameSize),
+        health = newText(CONFIG.HealthColor, CONFIG.HealthSize),
+        tool   = newText(CONFIG.ToolColor,   CONFIG.ToolSize),
+        armor  = newText(CONFIG.ArmorColor,  CONFIG.ArmorSize),
+        box    = newSquare(CONFIG.BoxColor,  Vector2.new(0,0), false),
     }
     armorCache[player] = nil
     adminCache[player] = nil
@@ -190,144 +285,9 @@ local function removeESP(player)
     toolCache[player]  = nil
 end
 
-local function buildRangeRing()
-    for i = 1, CONFIG.RangeRingSteps do
-        table.insert(rangeRingLines, newLine(CONFIG.RangeColor, 1))
-    end
-end
-
-local function updateRangeRing()
-    if not CONFIG.ShowRangeRing then
-        for _, l in ipairs(rangeRingLines) do setVisible(l, false) end
-        return
-    end
-    local char = LocalPlayer.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then
-        for _, l in ipairs(rangeRingLines) do setVisible(l, false) end
-        return
-    end
-    local center = root.Position
-    local n = CONFIG.RangeRingSteps
-    local r = CONFIG.RangeRingRadius
-    local step = (math.pi * 2) / n
-    for i = 1, n do
-        local a1 = (i - 1) * step
-        local a2 = i * step
-        local p1 = center + Vector3.new(math.cos(a1) * r, 0, math.sin(a1) * r)
-        local p2 = center + Vector3.new(math.cos(a2) * r, 0, math.sin(a2) * r)
-        local s1, o1 = Camera:WorldToViewportPoint(p1)
-        local s2, o2 = Camera:WorldToViewportPoint(p2)
-        local line = rangeRingLines[i]
-        if o1 and o2 then
-            line.From = Vector2.new(s1.X, s1.Y)
-            line.To   = Vector2.new(s2.X, s2.Y)
-            setVisible(line, true)
-        else
-            setVisible(line, false)
-        end
-    end
-end
-
-local function buildTrajectory()
-    for i = 1, CONFIG.TrajectorySteps do
-        table.insert(trajDots, newSquare(CONFIG.TrajColor, Vector2.new(4,4), true))
-    end
-end
-
-local function updateTrajectory()
-    if not CONFIG.ShowTrajectory then
-        for _, d in ipairs(trajDots) do setVisible(d, false) end
-        return
-    end
-    local char = LocalPlayer.Character
-    if not char or not char:FindFirstChildOfClass("Tool") then
-        for _, d in ipairs(trajDots) do setVisible(d, false) end
-        return
-    end
-    local vel = Camera.CFrame.LookVector * CONFIG.TrajectorySpeed
-    local pos = Camera.CFrame.Position
-    local dt = CONFIG.TrajectoryDt
-    local g = workspace.Gravity
-    local active = 0
-    for i = 1, CONFIG.TrajectorySteps do
-        vel = Vector3.new(vel.X, vel.Y - g * dt, vel.Z)
-        pos = pos + vel * dt
-        local sc, on = Camera:WorldToViewportPoint(pos)
-        local dot = trajDots[i]
-        if on then
-            setPos(dot, Vector2.new(sc.X - 2, sc.Y - 2))
-            setVisible(dot, true)
-            active = i
-        else
-            setVisible(dot, false)
-        end
-        if pos.Y < -100 then break end
-    end
-    for i = active + 1, CONFIG.TrajectorySteps do
-        setVisible(trajDots[i], false)
-    end
-end
-
-local function isProjectileCandidate(part)
-    if not part:IsA("BasePart") then return false end
-    if part.Anchored then return false end
-    local model = part:FindFirstAncestorOfClass("Model")
-    if model and Players:GetPlayerFromCharacter(model) then return false end
-    if part.AssemblyLinearVelocity.Magnitude < CONFIG.ProjectileSpeedMin then return false end
-    return true
-end
-
-local function trackProjectile(part)
-    if projectileCount >= CONFIG.ProjectileMaxCount then return end
-    if projectiles[part] then return end
-    projectiles[part] = {
-        square = newSquare(CONFIG.ProjColor, Vector2.new(6,6), true),
-        born   = tick(),
-    }
-    projectileCount = projectileCount + 1
-end
-
-local function untrackProjectile(part)
-    local rec = projectiles[part]
-    if not rec then return end
-    rec.square:Remove()
-    projectiles[part] = nil
-    projectileCount = projectileCount - 1
-end
-
-workspace.DescendantAdded:Connect(function(inst)
-    if not CONFIG.ShowProjectiles then return end
-    if not inst:IsA("BasePart") then return end
-    task.defer(function()
-        if not inst.Parent then return end
-        if isProjectileCandidate(inst) then
-            trackProjectile(inst)
-        end
-    end)
-end)
-
-local function updateProjectiles()
-    if not CONFIG.ShowProjectiles then
-        for part in pairs(projectiles) do untrackProjectile(part) end
-        return
-    end
-    local now = tick()
-    for part, p in pairs(projectiles) do
-        if not part.Parent or now - p.born > CONFIG.ProjectileMaxLife then
-            untrackProjectile(part)
-        else
-            local sc, on = Camera:WorldToViewportPoint(part.Position)
-            if on then
-                setPos(p.square, Vector2.new(sc.X - 3, sc.Y - 3))
-                setVisible(p.square, true)
-            else
-                setVisible(p.square, false)
-            end
-        end
-    end
-end
-
+--=============================================================
+-- RADAR
+--=============================================================
 local function ensureRadarDot(player)
     if radarDots[player] then return end
     radarDots[player] = {
@@ -432,6 +392,8 @@ local function updateRadar()
         local color, size
         if ac.isAdmin then
             color, size = CONFIG.AdminColor, Vector2.new(9,9)
+        elseif targetPlayers[player] then
+            color, size = CONFIG.AccentBright, Vector2.new(8,8)
         else
             local dyW = rel.Y
             if dyW > 10 then color = Color3.fromRGB(255, 90, 90)
@@ -459,20 +421,38 @@ local function updateRadar()
     end
 end
 
+--=============================================================
+-- MOVEMENT
+--=============================================================
 local function applyMovement()
     local char = LocalPlayer.Character
     if not char then return end
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return end
+
     if CONFIG.WalkSpeed ~= 16 and hum.WalkSpeed ~= CONFIG.WalkSpeed then
         hum.WalkSpeed = CONFIG.WalkSpeed
     end
+
+    if CONFIG.JumpPower ~= 50 then
+        hum.UseJumpPower = true
+        if hum.JumpPower ~= CONFIG.JumpPower then
+            hum.JumpPower = CONFIG.JumpPower
+        end
+    end
+
     if CONFIG.Noclip then
         for _, d in ipairs(char:GetDescendants()) do
             if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" and d.CanCollide then
                 d.CanCollide = false
             end
         end
+    end
+end
+
+local function applyGravity()
+    if workspace.Gravity ~= CONFIG.Gravity then
+        workspace.Gravity = CONFIG.Gravity
     end
 end
 
@@ -496,11 +476,392 @@ local function updateClimbers()
     end
 end
 
-local function tracerOrigin()
-    local vp = Camera.ViewportSize
-    return Vector2.new(vp.X * 0.5, vp.Y + 5)
+local function updateBunnyHop()
+    if not CONFIG.BunnyHop then return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum and hum.FloorMaterial ~= Enum.Material.Air then
+        hum.Jump = true
+    end
 end
 
+--=============================================================
+-- HITBOX WIDENER
+--=============================================================
+local function isEnemy(player)
+    if not CONFIG.HitboxTeamCheck then return true end
+    local myTeam = LocalPlayer.Team
+    if not myTeam then return true end
+    return player.Team ~= myTeam
+end
+
+local function applyHitbox(player)
+    if player == LocalPlayer then return end
+    local char = player.Character
+    if not char then return end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return end
+    if not isEnemy(player) then return end
+
+    -- Prefer HumanoidRootPart — bigger and doesn't rotate with head
+    local part = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
+    if not part then return end
+
+    local existing = hitboxes[player]
+    if existing and existing.part == part then
+        -- Just re-apply size in case game reset it
+        if part.Size ~= existing.appliedSize then
+            pcall(function() part.Size = existing.appliedSize end)
+        end
+        if part.Transparency ~= CONFIG.HitboxTransparency then
+            pcall(function() part.Transparency = CONFIG.HitboxTransparency end)
+        end
+        return
+    end
+
+    -- New part — save originals
+    hitboxes[player] = {
+        part = part,
+        originalSize = part.Size,
+        originalTransparency = part.Transparency,
+        appliedSize = Vector3.new(CONFIG.HitboxSize, CONFIG.HitboxSize, CONFIG.HitboxSize),
+    }
+    pcall(function() part.Size = hitboxes[player].appliedSize end)
+    pcall(function() part.Transparency = CONFIG.HitboxTransparency end)
+end
+
+local function restoreHitbox(player)
+    local rec = hitboxes[player]
+    if not rec then return end
+    if rec.part and rec.part.Parent then
+        pcall(function() rec.part.Size = rec.originalSize end)
+        pcall(function() rec.part.Transparency = rec.originalTransparency end)
+    end
+    hitboxes[player] = nil
+end
+
+local function restoreAllHitboxes()
+    for player in pairs(hitboxes) do
+        restoreHitbox(player)
+    end
+    hitboxes = {}
+end
+
+local function updateHitboxes()
+    if not CONFIG.HitboxEnabled then
+        if next(hitboxes) then restoreAllHitboxes() end
+        return
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            applyHitbox(player)
+        end
+    end
+
+    -- Restore any player who no longer qualifies (left team, died, etc.)
+    for player, rec in pairs(hitboxes) do
+        local char = player.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not char or not hum or hum.Health <= 0 or not isEnemy(player) then
+            restoreHitbox(player)
+        end
+    end
+end
+
+--=============================================================
+-- FULLBRIGHT
+--=============================================================
+local function setFullbright(on)
+    if on then
+        if not savedLighting then
+            savedLighting = {
+                Brightness     = Lighting.Brightness,
+                Ambient        = Lighting.Ambient,
+                OutdoorAmbient = Lighting.OutdoorAmbient,
+                ClockTime      = Lighting.ClockTime,
+                FogEnd         = Lighting.FogEnd,
+                GlobalShadows  = Lighting.GlobalShadows,
+            }
+        end
+        Lighting.Brightness     = 3
+        Lighting.Ambient        = Color3.fromRGB(200, 200, 200)
+        Lighting.OutdoorAmbient = Color3.fromRGB(200, 200, 200)
+        Lighting.ClockTime      = 14
+        Lighting.FogEnd         = 100000
+        Lighting.GlobalShadows  = false
+    else
+        if savedLighting then
+            Lighting.Brightness     = savedLighting.Brightness
+            Lighting.Ambient        = savedLighting.Ambient
+            Lighting.OutdoorAmbient = savedLighting.OutdoorAmbient
+            Lighting.ClockTime      = savedLighting.ClockTime
+            Lighting.FogEnd         = savedLighting.FogEnd
+            Lighting.GlobalShadows  = savedLighting.GlobalShadows
+            savedLighting = nil
+        end
+    end
+end
+
+--=============================================================
+-- ANTI-AFK
+--=============================================================
+LocalPlayer.Idled:Connect(function()
+    if not CONFIG.AntiAFK then return end
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end)
+
+--=============================================================
+-- INFINITE JUMP
+--=============================================================
+UserInputService.JumpRequest:Connect(function()
+    if not CONFIG.InfiniteJump then return end
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function()
+            hum:ChangeState(Enum.HumanoidStateType.Jumping)
+        end)
+    end
+end)
+
+--=============================================================
+-- CLICK TELEPORT
+--=============================================================
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if not CONFIG.ClickTP then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local ray = Camera:ScreenPointToRay(input.Position.X, input.Position.Y)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { char }
+        local result = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
+        if result then
+            hrp.CFrame = CFrame.new(result.Position + Vector3.new(0, 3.5, 0))
+        end
+    end
+end)
+
+--=============================================================
+-- FLING
+--=============================================================
+local function flingPlayer(player)
+    local char = LocalPlayer.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    local tHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    if not tHrp then return end
+
+    local delta = tHrp.Position - hrp.Position
+    local dir = delta.Magnitude > 0.1 and delta.Unit or Vector3.new(0, 1, 0)
+    tHrp.AssemblyLinearVelocity = dir * CONFIG.FlingPower + Vector3.new(0, CONFIG.FlingLift, 0)
+
+    local spin = Instance.new("BodyAngularVelocity")
+    spin.AngularVelocity = Vector3.new(
+        math.random(-100, 100),
+        math.random(-100, 100),
+        math.random(-100, 100)
+    ) * (CONFIG.FlingSpin / 100)
+    spin.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    spin.P = 100000
+    spin.Parent = tHrp
+    Debris:AddItem(spin, 0.4)
+end
+
+local function countTargets()
+    local n = 0
+    for p in pairs(targetPlayers) do
+        if p.Parent then n = n + 1 end
+    end
+    return n
+end
+
+local function flingNearbyPlayers()
+    if not CONFIG.FlingEnabled then return end
+    local now = tick()
+    if now - lastFling < CONFIG.FlingCooldown then return end
+
+    local char = LocalPlayer.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    lastFling = now
+
+    if countTargets() > 0 then
+        for p in pairs(targetPlayers) do
+            if p.Parent and p ~= LocalPlayer then
+                flingPlayer(p)
+            end
+        end
+        return
+    end
+
+    local origin  = hrp.Position
+    local rangeSq = CONFIG.FlingRange * CONFIG.FlingRange
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local tHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+            if tHrp then
+                local d = tHrp.Position - origin
+                if d.Magnitude * d.Magnitude <= rangeSq then
+                    flingPlayer(player)
+                end
+            end
+        end
+    end
+end
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == CONFIG.FlingKey then
+        flingNearbyPlayers()
+    end
+end)
+
+--=============================================================
+-- ANTI-KICK
+--=============================================================
+local function initAntiKick()
+    local ok, err = pcall(function()
+        local mt = getrawmetatable(game)
+        local oldNamecall = mt.__namecall
+        setreadonly(mt, false)
+        mt.__namecall = newcclosure(function(self, ...)
+            local method = getnamecallmethod()
+            if CONFIG.AntiKick and method == "Kick" and self == LocalPlayer then
+                return
+            end
+            return oldNamecall(self, ...)
+        end)
+        setreadonly(mt, true)
+    end)
+    if not ok then
+        warn("[BeatHub] Anti-Kick hook failed: " .. tostring(err))
+    end
+end
+
+--=============================================================
+-- ANTI-FLING
+--=============================================================
+local MOVER_TYPES = {
+    "BodyAngularVelocity", "BodyVelocity", "BodyForce",
+    "BodyThrust", "BodyPosition", "BodyGyro",
+}
+
+local function setupAntiFlingChar(char)
+    if not char then return end
+    char.DescendantAdded:Connect(function(d)
+        if not CONFIG.AntiFling then return end
+        for _, t in ipairs(MOVER_TYPES) do
+            if d:IsA(t) then
+                task.defer(function()
+                    if d and d.Parent then d:Destroy() end
+                end)
+                return
+            end
+        end
+    end)
+end
+
+local function updateAntiFling()
+    if not CONFIG.AntiFling then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    for _, d in ipairs(char:GetDescendants()) do
+        for _, t in ipairs(MOVER_TYPES) do
+            if d:IsA(t) then
+                d:Destroy()
+                break
+            end
+        end
+    end
+
+    if hrp.AssemblyLinearVelocity.Magnitude > 1000 then
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    end
+    if hrp.AssemblyAngularVelocity.Magnitude > 100 then
+        hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+    end
+end
+
+--=============================================================
+-- SERVER HOP / SUB-PLACES / REJOIN / COPY JOB ID
+--=============================================================
+local function serverHop()
+    task.spawn(function()
+        local placeId = game.PlaceId
+        local jobId   = game.JobId
+        local data = httpGetJson(
+            "https://games.roblox.com/v1/games/" .. placeId ..
+            "/servers/Public?sortOrder=Asc&limit=100"
+        )
+        if not data or not data.data then
+            notify("Server hop failed")
+            return
+        end
+        for _, server in ipairs(data.data) do
+            if server.id ~= jobId and server.playing < server.maxPlayers then
+                notify("Hopping servers...")
+                pcall(function()
+                    TeleportService:TeleportToPlaceInstance(placeId, server.id, LocalPlayer)
+                end)
+                return
+            end
+        end
+        notify("No available servers")
+    end)
+end
+
+local function getSubPlaces()
+    local universeId = game.GameId
+    local url = "https://develop.roblox.com/v1/universes/" .. universeId ..
+                "/places?limit=100&sortOrder=Asc"
+    local data = httpGetJson(url)
+    if not data or not data.data then
+        warn("[BeatHub] Failed to fetch sub-places. URL tried: " .. url)
+        return {}
+    end
+    return data.data
+end
+
+local function teleportToPlace(placeId)
+    notify("Teleporting...")
+    pcall(function()
+        TeleportService:Teleport(placeId, LocalPlayer)
+    end)
+end
+
+local function rejoin()
+    notify("Rejoining...")
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end
+
+local function copyJobId()
+    local id = game.JobId
+    if #id == 0 then id = "(reserved server)" end
+    local ok = pcall(function() setclipboard(id) end)
+    if ok then
+        notify("Copied Job ID")
+    else
+        notify("Job ID: " .. id:sub(1, 18) .. "...")
+    end
+end
+
+--=============================================================
+-- ESP RENDER
+--=============================================================
 local function renderESP(now)
     if not CONFIG.Enabled then
         for _, d in pairs(espData) do
@@ -509,14 +870,12 @@ local function renderESP(now)
             setVisible(d.health, false)
             setVisible(d.tool, false)
             setVisible(d.armor, false)
-            setVisible(d.tracer, false)
-            setVisible(d.aim, false)
+            setVisible(d.box, false)
         end
         return
     end
 
     local camPos = Camera.CFrame.Position
-    local origin = tracerOrigin()
 
     for player, data in pairs(espData) do
         local char = player.Character
@@ -524,7 +883,7 @@ local function renderESP(now)
         local head = char and char:FindFirstChild("Head")
         local root = char and char:FindFirstChild("HumanoidRootPart")
 
-        local alive = char and hum and head and root and hum.Health > 0
+        local alive   = char and hum and head and root and hum.Health > 0
         local inRange = alive and (camPos - root.Position).Magnitude <= CONFIG.MaxDistance
 
         if not inRange then
@@ -533,8 +892,7 @@ local function renderESP(now)
             setVisible(data.health, false)
             setVisible(data.tool, false)
             setVisible(data.armor, false)
-            setVisible(data.tracer, false)
-            setVisible(data.aim, false)
+            setVisible(data.box, false)
             continue
         end
 
@@ -546,8 +904,7 @@ local function renderESP(now)
             setVisible(data.health, false)
             setVisible(data.tool, false)
             setVisible(data.armor, false)
-            setVisible(data.tracer, false)
-            setVisible(data.aim, false)
+            setVisible(data.box, false)
             continue
         end
 
@@ -568,7 +925,9 @@ local function renderESP(now)
         else setVisible(data.admin, false) end
 
         if CONFIG.ShowName then
-            setText(data.name, player.Name)
+            local nameStr = player.Name
+            if targetPlayers[player] then nameStr = "★ " .. nameStr end
+            setText(data.name, nameStr)
             setPos(data.name, pos + Vector2.new(0, y))
             setVisible(data.name, true)
             y = y + 13
@@ -609,26 +968,36 @@ local function renderESP(now)
             else setVisible(data.armor, false) end
         else setVisible(data.armor, false) end
 
-        if CONFIG.ShowTracers then
-            data.tracer.From = origin
-            data.tracer.To = pos + Vector2.new(0, -6)
-            setVisible(data.tracer, true)
-        else setVisible(data.tracer, false) end
-
-        if CONFIG.ShowAimIndicator then
-            local hp3 = head.Position
-            local le  = hp3 + head.CFrame.LookVector * CONFIG.AimLineLength
-            local s1, o1 = Camera:WorldToViewportPoint(hp3)
-            local s2, o2 = Camera:WorldToViewportPoint(le)
-            if o1 and o2 then
-                data.aim.From = Vector2.new(s1.X, s1.Y)
-                data.aim.To   = Vector2.new(s2.X, s2.Y)
-                setVisible(data.aim, true)
-            else setVisible(data.aim, false) end
-        else setVisible(data.aim, false) end
+        if CONFIG.ShowBoxes then
+            local topPos = head.Position + Vector3.new(0, 0.5, 0)
+            local botPos = root.Position - Vector3.new(0, 3, 0)
+            local topSc, topOn = Camera:WorldToViewportPoint(topPos)
+            local botSc, botOn = Camera:WorldToViewportPoint(botPos)
+            if topOn and botOn then
+                local boxH = botSc.Y - topSc.Y
+                local boxW = boxH * 0.55
+                data.box.Size = Vector2.new(boxW, boxH)
+                data.box.Position = Vector2.new(topSc.X - boxW/2, topSc.Y)
+                if targetPlayers[player] then
+                    data.box.Color = CONFIG.AccentBright
+                elseif adminCache[player] and adminCache[player].isAdmin then
+                    data.box.Color = CONFIG.AdminColor
+                else
+                    data.box.Color = CONFIG.BoxColor
+                end
+                setVisible(data.box, true)
+            else
+                setVisible(data.box, false)
+            end
+        else
+            setVisible(data.box, false)
+        end
     end
 end
 
+--=============================================================
+-- PLAYER LIFECYCLE
+--=============================================================
 for _, p in ipairs(Players:GetPlayers()) do
     createESP(p); ensureRadarDot(p)
 end
@@ -639,15 +1008,23 @@ Players.PlayerAdded:Connect(function(p)
         armorCache[p] = nil
         adminCache[p] = nil
         toolCache[p]  = nil
+        restoreHitbox(p)  -- fresh char = fresh parts, will re-apply next frame
     end)
+    if refreshTargetList then refreshTargetList() end
 end)
 
 Players.PlayerRemoving:Connect(function(p)
     removeESP(p)
+    restoreHitbox(p)
     local d = radarDots[p]
     if d then d.dot:Remove(); d.dir:Remove(); radarDots[p] = nil end
+    targetPlayers[p] = nil
+    if refreshTargetList then refreshTargetList() end
 end)
 
+--=============================================================
+-- GUI
+--=============================================================
 local function make(class, props, parent)
     local i = Instance.new(class)
     for k, v in pairs(props or {}) do i[k] = v end
@@ -678,8 +1055,7 @@ local function buildGUI()
         ZIndex = 2,
     }, gui)
     make("UIStroke", {
-        Color = CONFIG.Accent,
-        Thickness = 1,
+        Color = CONFIG.Accent, Thickness = 1,
         ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
     }, panel)
 
@@ -727,24 +1103,18 @@ local function buildGUI()
         Position = UDim2.new(1, -52, 0, 8),
         BackgroundColor3 = CONFIG.Bg2,
         BorderSizePixel = 0,
-        Font = Enum.Font.Code,
-        TextSize = 14,
-        TextColor3 = CONFIG.TextDim,
-        Text = "-",
-        AutoButtonColor = false,
-        ZIndex = 5,
+        Font = Enum.Font.Code, TextSize = 14,
+        TextColor3 = CONFIG.TextDim, Text = "-",
+        AutoButtonColor = false, ZIndex = 5,
     }, header)
     local closeBtn = make("TextButton", {
         Size = UDim2.new(0, 24, 0, 24),
         Position = UDim2.new(1, -26, 0, 8),
         BackgroundColor3 = CONFIG.Bg2,
         BorderSizePixel = 0,
-        Font = Enum.Font.Code,
-        TextSize = 14,
-        TextColor3 = CONFIG.TextDim,
-        Text = "X",
-        AutoButtonColor = false,
-        ZIndex = 5,
+        Font = Enum.Font.Code, TextSize = 14,
+        TextColor3 = CONFIG.TextDim, Text = "X",
+        AutoButtonColor = false, ZIndex = 5,
     }, header)
 
     local tabBar = make("Frame", {
@@ -755,7 +1125,7 @@ local function buildGUI()
     }, panel)
     make("UIListLayout", {
         FillDirection = Enum.FillDirection.Horizontal,
-        Padding = UDim.new(0, 6),
+        Padding = UDim.new(0, 4),
     }, tabBar)
 
     local pageHolder = make("Frame", {
@@ -766,11 +1136,16 @@ local function buildGUI()
     }, panel)
 
     local function makePage()
-        local page = make("Frame", {
+        local page = make("ScrollingFrame", {
             Size = UDim2.new(1, 0, 1, 0),
             BackgroundTransparency = 1,
             Visible = false,
             ZIndex = 3,
+            CanvasSize = UDim2.new(0, 0, 0, 0),
+            ScrollBarThickness = 3,
+            ScrollBarImageColor3 = CONFIG.Accent,
+            ScrollingDirection = Enum.ScrollingDirection.Y,
+            AutomaticCanvasSize = Enum.AutomaticSize.Y,
         }, pageHolder)
         make("UIListLayout", {
             Padding = UDim.new(0, 3),
@@ -779,20 +1154,22 @@ local function buildGUI()
         return page
     end
 
-    local espPage  = makePage()
-    local movePage = makePage()
-    local aimPage  = makePage()
-    local miscPage = makePage()
-    local pages = { espPage, movePage, aimPage, miscPage }
+    local espPage    = makePage()
+    local movePage   = makePage()
+    local combatPage = makePage()
+    local flingPage  = makePage()
+    local targetPage = makePage()
+    local miscPage   = makePage()
+    local pages = { espPage, movePage, combatPage, flingPage, targetPage, miscPage }
     local tabs  = {}
 
     local function makeTab(label, order, page, defaultOn)
         local btn = make("TextButton", {
-            Size = UDim2.new(0, 50, 1, 0),
+            Size = UDim2.new(0, 38, 1, 0),
             BackgroundColor3 = defaultOn and CONFIG.AccentDim or CONFIG.Bg1,
             BorderSizePixel = 0,
             Font = Enum.Font.GothamBold,
-            TextSize = 11,
+            TextSize = 9,
             TextColor3 = defaultOn and CONFIG.AccentBright or CONFIG.TextDim,
             Text = label,
             AutoButtonColor = false,
@@ -801,7 +1178,7 @@ local function buildGUI()
         }, tabBar)
         tabs[page] = btn
         btn.MouseButton1Click:Connect(function()
-            for p, b in pairs(tabs) do
+            for _, b in pairs(tabs) do
                 b.BackgroundColor3 = CONFIG.Bg1
                 b.TextColor3 = CONFIG.TextDim
             end
@@ -813,10 +1190,12 @@ local function buildGUI()
         if defaultOn then page.Visible = true end
     end
 
-    makeTab("ESP",  1, espPage,  true)
-    makeTab("MOVE", 2, movePage, false)
-    makeTab("AIM",  3, aimPage,  false)
-    makeTab("MISC", 4, miscPage, false)
+    makeTab("ESP",    1, espPage,    true)
+    makeTab("MOVE",   2, movePage,   false)
+    makeTab("COMBAT", 3, combatPage, false)
+    makeTab("FLING",  4, flingPage,  false)
+    makeTab("TARG",   5, targetPage, false)
+    makeTab("MISC",   6, miscPage,   false)
 
     local function makeRow(parent, label, order, getter, setter)
         local row = make("Frame", {
@@ -825,46 +1204,36 @@ local function buildGUI()
             BorderSizePixel = 0,
             LayoutOrder = order,
         }, parent)
-
         local bar = make("Frame", {
             Size = UDim2.new(0, 3, 1, 0),
             BackgroundColor3 = getter() and CONFIG.Accent or CONFIG.Bg2,
             BorderSizePixel = 0,
             ZIndex = 4,
         }, row)
-
         make("TextLabel", {
             Size = UDim2.new(1, -50, 1, 0),
             Position = UDim2.new(0, 12, 0, 0),
             BackgroundTransparency = 1,
-            Font = Enum.Font.Gotham,
-            TextSize = 12,
+            Font = Enum.Font.Gotham, TextSize = 12,
             TextColor3 = CONFIG.Text,
             TextXAlignment = Enum.TextXAlignment.Left,
-            Text = label,
-            ZIndex = 4,
+            Text = label, ZIndex = 4,
         }, row)
-
         local status = make("TextLabel", {
             Size = UDim2.new(0, 36, 1, 0),
             Position = UDim2.new(1, -40, 0, 0),
             BackgroundTransparency = 1,
-            Font = Enum.Font.Code,
-            TextSize = 11,
+            Font = Enum.Font.Code, TextSize = 11,
             TextColor3 = getter() and CONFIG.AccentBright or CONFIG.TextDim,
             TextXAlignment = Enum.TextXAlignment.Right,
             Text = getter() and "ON" or "OFF",
             ZIndex = 4,
         }, row)
-
         local btn = make("TextButton", {
             Size = UDim2.new(1, 0, 1, 0),
-            BackgroundTransparency = 1,
-            Text = "",
-            AutoButtonColor = false,
-            ZIndex = 6,
+            BackgroundTransparency = 1, Text = "",
+            AutoButtonColor = false, ZIndex = 6,
         }, row)
-
         btn.MouseButton1Click:Connect(function()
             setter(not getter())
             local on = getter()
@@ -876,102 +1245,315 @@ local function buildGUI()
         btn.MouseLeave:Connect(function() row.BackgroundColor3 = CONFIG.Bg1 end)
     end
 
+    local function makeActionRow(parent, label, order, callback)
+        local row = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 30),
+            BackgroundColor3 = CONFIG.Bg2,
+            BorderSizePixel = 0,
+            LayoutOrder = order,
+        }, parent)
+        make("Frame", {
+            Size = UDim2.new(0, 3, 1, 0),
+            BackgroundColor3 = CONFIG.Accent,
+            BorderSizePixel = 0, ZIndex = 4,
+        }, row)
+        make("TextLabel", {
+            Size = UDim2.new(1, -20, 1, 0),
+            Position = UDim2.new(0, 12, 0, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold, TextSize = 12,
+            TextColor3 = CONFIG.AccentBright,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = label, ZIndex = 4,
+        }, row)
+        local btn = make("TextButton", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1, Text = "",
+            AutoButtonColor = false, ZIndex = 6,
+        }, row)
+        btn.MouseButton1Click:Connect(callback)
+        btn.MouseEnter:Connect(function() row.BackgroundColor3 = CONFIG.AccentDim end)
+        btn.MouseLeave:Connect(function() row.BackgroundColor3 = CONFIG.Bg2 end)
+        return row
+    end
+
+    local function makeSlider(parent, label, order, minV, maxV, step, getter, setter)
+        local row = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundColor3 = CONFIG.Bg1,
+            BorderSizePixel = 0, LayoutOrder = order,
+        }, parent)
+        make("TextLabel", {
+            Size = UDim2.new(1, -110, 1, 0),
+            Position = UDim2.new(0, 12, 0, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 12,
+            TextColor3 = CONFIG.Text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = label, ZIndex = 4,
+        }, row)
+        local valLbl = make("TextLabel", {
+            Size = UDim2.new(0, 44, 1, 0),
+            Position = UDim2.new(1, -94, 0, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Code, TextSize = 12,
+            TextColor3 = CONFIG.AccentBright,
+            Text = tostring(getter()), ZIndex = 4,
+        }, row)
+        local minusBtn = make("TextButton", {
+            Size = UDim2.new(0, 22, 0, 20),
+            Position = UDim2.new(1, -48, 0, 3),
+            BackgroundColor3 = CONFIG.Bg2, BorderSizePixel = 0,
+            Font = Enum.Font.Code, TextSize = 14,
+            TextColor3 = CONFIG.Text, Text = "-",
+            AutoButtonColor = false, ZIndex = 5,
+        }, row)
+        local plusBtn = make("TextButton", {
+            Size = UDim2.new(0, 22, 0, 20),
+            Position = UDim2.new(1, -24, 0, 3),
+            BackgroundColor3 = CONFIG.Bg2, BorderSizePixel = 0,
+            Font = Enum.Font.Code, TextSize = 14,
+            TextColor3 = CONFIG.Text, Text = "+",
+            AutoButtonColor = false, ZIndex = 5,
+        }, row)
+        minusBtn.MouseButton1Click:Connect(function()
+            setter(math.max(minV, getter() - step))
+            valLbl.Text = tostring(getter())
+        end)
+        plusBtn.MouseButton1Click:Connect(function()
+            setter(math.min(maxV, getter() + step))
+            valLbl.Text = tostring(getter())
+        end)
+    end
+
+    --==== ESP ====--
     makeRow(espPage, "Enable ESP", 1, function() return CONFIG.Enabled    end, function(v) CONFIG.Enabled = v    end)
     makeRow(espPage, "Username",   2, function() return CONFIG.ShowName   end, function(v) CONFIG.ShowName = v   end)
     makeRow(espPage, "Health",     3, function() return CONFIG.ShowHealth end, function(v) CONFIG.ShowHealth = v end)
     makeRow(espPage, "Tool",       4, function() return CONFIG.ShowTool   end, function(v) CONFIG.ShowTool = v   end)
     makeRow(espPage, "Armor",      5, function() return CONFIG.ShowArmor  end, function(v) CONFIG.ShowArmor = v  end)
+    makeRow(espPage, "Boxes",      6, function() return CONFIG.ShowBoxes  end, function(v) CONFIG.ShowBoxes = v  end)
 
+    --==== MOVE ====--
     makeRow(movePage, "Noclip",           1, function() return CONFIG.Noclip          end, function(v) CONFIG.Noclip = v          end)
     makeRow(movePage, "Mountain Climber", 2, function() return CONFIG.MountainClimber end, function(v) CONFIG.MountainClimber = v end)
     makeRow(movePage, "Wall Climber",     3, function() return CONFIG.WallClimber     end, function(v) CONFIG.WallClimber = v     end)
+    makeRow(movePage, "Infinite Jump",    4, function() return CONFIG.InfiniteJump    end, function(v) CONFIG.InfiniteJump = v    end)
+    makeRow(movePage, "Bunny Hop",        5, function() return CONFIG.BunnyHop        end, function(v) CONFIG.BunnyHop = v        end)
+    makeSlider(movePage, "WalkSpeed",  6, 16, 500, 4,
+        function() return CONFIG.WalkSpeed end,
+        function(v) CONFIG.WalkSpeed = v end)
+    makeSlider(movePage, "JumpPower",  7, 50, 500, 10,
+        function() return CONFIG.JumpPower end,
+        function(v) CONFIG.JumpPower = v end)
+    makeSlider(movePage, "Gravity",    8, 0, 300, 10,
+        function() return CONFIG.Gravity end,
+        function(v) CONFIG.Gravity = v end)
 
-    local wsRow = make("Frame", {
-        Size = UDim2.new(1, 0, 0, 26),
-        BackgroundColor3 = CONFIG.Bg1,
+    --==== COMBAT ====--
+    makeRow(combatPage, "Hitbox Widener", 1,
+        function() return CONFIG.HitboxEnabled end,
+        function(v) CONFIG.HitboxEnabled = v end)
+    makeRow(combatPage, "Team Check",     2,
+        function() return CONFIG.HitboxTeamCheck end,
+        function(v) CONFIG.HitboxTeamCheck = v end)
+    makeSlider(combatPage, "Hitbox Size", 3, 2, 20, 1,
+        function() return CONFIG.HitboxSize end,
+        function(v)
+            CONFIG.HitboxSize = v
+            -- Force re-apply with new size
+            for player, rec in pairs(hitboxes) do
+                if rec and rec.part and rec.part.Parent then
+                    rec.appliedSize = Vector3.new(v, v, v)
+                end
+            end
+        end)
+    makeSlider(combatPage, "Hitbox Opacity", 4, 0, 100, 10,
+        function() return math.floor((1 - CONFIG.HitboxTransparency) * 100) end,
+        function(v)
+            CONFIG.HitboxTransparency = 1 - (v / 100)
+            for _, rec in pairs(hitboxes) do
+                if rec and rec.part and rec.part.Parent then
+                    pcall(function() rec.part.Transparency = CONFIG.HitboxTransparency end)
+                end
+            end
+        end)
+
+    --==== FLING ====--
+    makeRow(flingPage, "Fling Enabled", 1,
+        function() return CONFIG.FlingEnabled end,
+        function(v) CONFIG.FlingEnabled = v end)
+    makeSlider(flingPage, "Fling Range", 2, 5, 100, 5,
+        function() return CONFIG.FlingRange end,
+        function(v) CONFIG.FlingRange = v end)
+    makeSlider(flingPage, "Fling Power", 3, 100, 1500, 50,
+        function() return CONFIG.FlingPower end,
+        function(v) CONFIG.FlingPower = v end)
+    makeSlider(flingPage, "Fling Lift", 4, 0, 800, 40,
+        function() return CONFIG.FlingLift end,
+        function(v) CONFIG.FlingLift = v end)
+    makeSlider(flingPage, "Fling Spin", 5, 0, 500, 20,
+        function() return CONFIG.FlingSpin end,
+        function(v) CONFIG.FlingSpin = v end)
+    makeActionRow(flingPage, "TRIGGER FLING  [" .. CONFIG.FlingKey.Name .. "]", 6, flingNearbyPlayers)
+
+    --==== TARGET ====--
+    refreshTargetList = function()
+        for _, r in pairs(targetListRows) do r:Destroy() end
+        targetListRows = {}
+
+        local hdr = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundColor3 = CONFIG.Bg2,
+            BorderSizePixel = 0, LayoutOrder = 0,
+        }, targetPage)
+        make("TextLabel", {
+            Size = UDim2.new(1, -80, 1, 0),
+            Position = UDim2.new(0, 10, 0, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold, TextSize = 11,
+            TextColor3 = CONFIG.AccentBright,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = "TARGETS: " .. tostring(countTargets()),
+            ZIndex = 4,
+        }, hdr)
+        local clearAll = make("TextButton", {
+            Size = UDim2.new(0, 60, 0, 20),
+            Position = UDim2.new(1, -66, 0, 3),
+            BackgroundColor3 = CONFIG.Bg1,
+            BorderSizePixel = 0,
+            Font = Enum.Font.GothamBold, TextSize = 10,
+            TextColor3 = CONFIG.TextDim,
+            Text = "CLEAR ALL",
+            AutoButtonColor = false, ZIndex = 5,
+        }, hdr)
+        clearAll.MouseButton1Click:Connect(function()
+            targetPlayers = {}
+            refreshTargetList()
+        end)
+        table.insert(targetListRows, hdr)
+
+        local order = 1
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p == LocalPlayer then continue end
+            local isTarget = targetPlayers[p] == true
+            local row = make("Frame", {
+                Size = UDim2.new(1, 0, 0, 26),
+                BackgroundColor3 = isTarget and CONFIG.AccentDim or CONFIG.Bg1,
+                BorderSizePixel = 0, LayoutOrder = order,
+            }, targetPage)
+            order = order + 1
+            make("TextLabel", {
+                Size = UDim2.new(1, -70, 1, 0),
+                Position = UDim2.new(0, 10, 0, 0),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham, TextSize = 12,
+                TextColor3 = isTarget and CONFIG.AccentBright or CONFIG.Text,
+                TextXAlignment = Enum.TextXAlignment.Left,
+                Text = p.Name, ZIndex = 4,
+            }, row)
+            local btn = make("TextButton", {
+                Size = UDim2.new(0, 56, 0, 20),
+                Position = UDim2.new(1, -60, 0, 3),
+                BackgroundColor3 = isTarget and CONFIG.Accent or CONFIG.Bg2,
+                BorderSizePixel = 0,
+                Font = Enum.Font.GothamBold, TextSize = 10,
+                TextColor3 = isTarget and Color3.new(1,1,1) or CONFIG.Text,
+                Text = isTarget and "UNTARGET" or "TARGET",
+                AutoButtonColor = false, ZIndex = 5,
+            }, row)
+            btn.MouseButton1Click:Connect(function()
+                if targetPlayers[p] then
+                    targetPlayers[p] = nil
+                else
+                    targetPlayers[p] = true
+                end
+                refreshTargetList()
+            end)
+            table.insert(targetListRows, row)
+        end
+        if #targetListRows <= 1 then
+            local lbl = make("TextLabel", {
+                Size = UDim2.new(1, 0, 0, 30),
+                BackgroundTransparency = 1,
+                Font = Enum.Font.Gotham, TextSize = 11,
+                TextColor3 = CONFIG.TextDim,
+                Text = "No other players online",
+                LayoutOrder = 2, ZIndex = 4,
+            }, targetPage)
+            table.insert(targetListRows, lbl)
+        end
+    end
+    refreshTargetList()
+
+    --==== MISC ====--
+    makeRow(miscPage, "Admin Alert",     1, function() return CONFIG.ShowAdmins  end, function(v) CONFIG.ShowAdmins = v  end)
+    makeRow(miscPage, "Radar",           2, function() return CONFIG.ShowRadar   end, function(v) CONFIG.ShowRadar = v   end)
+    makeRow(miscPage, "FPS Overlay",     3, function() return CONFIG.ShowFPS     end, function(v) CONFIG.ShowFPS = v     end)
+    makeRow(miscPage, "Anti-Kick",       4, function() return CONFIG.AntiKick    end, function(v) CONFIG.AntiKick = v    end)
+    makeRow(miscPage, "Anti-Fling",      5, function() return CONFIG.AntiFling   end, function(v) CONFIG.AntiFling = v   end)
+    makeRow(miscPage, "Anti-AFK",        6, function() return CONFIG.AntiAFK     end, function(v) CONFIG.AntiAFK = v     end)
+    makeRow(miscPage, "Click Teleport",  7, function() return CONFIG.ClickTP     end, function(v) CONFIG.ClickTP = v     end)
+    makeRow(miscPage, "Fullbright",      8,
+        function() return CONFIG.Fullbright end,
+        function(v) CONFIG.Fullbright = v; setFullbright(v) end)
+    makeActionRow(miscPage, "SERVER HOP",  9,  serverHop)
+    makeActionRow(miscPage, "REJOIN",      10, rejoin)
+    makeActionRow(miscPage, "COPY JOB ID", 11, copyJobId)
+
+    do
+        local hdr = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 22),
+            BackgroundColor3 = CONFIG.Bg2,
+            BorderSizePixel = 0, LayoutOrder = 20,
+        }, miscPage)
+        make("TextLabel", {
+            Size = UDim2.new(1, 0, 1, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.GothamBold, TextSize = 11,
+            TextColor3 = CONFIG.AccentBright,
+            Text = "SUB-PLACES",
+            ZIndex = 4,
+        }, hdr)
+    end
+
+    local subPlaceHolder = make("Frame", {
+        Size = UDim2.new(1, 0, 0, 0),
+        BackgroundTransparency = 1,
+        LayoutOrder = 21,
+        AutomaticSize = Enum.AutomaticSize.Y,
+    }, miscPage)
+    make("UIListLayout", {
+        Padding = UDim.new(0, 3),
+        SortOrder = Enum.SortOrder.LayoutOrder,
+    }, subPlaceHolder)
+
+    guiRefs.subPlaceHolder = subPlaceHolder
+
+    --==== Toast ====--
+    local toast = make("TextLabel", {
+        Size = UDim2.new(0, 300, 0, 28),
+        Position = UDim2.new(0.5, -150, 0, 40),
+        BackgroundColor3 = CONFIG.Bg,
         BorderSizePixel = 0,
-        LayoutOrder = 4,
-    }, movePage)
-    make("TextLabel", {
-        Size = UDim2.new(1, -110, 1, 0),
-        Position = UDim2.new(0, 12, 0, 0),
-        BackgroundTransparency = 1,
-        Font = Enum.Font.Gotham,
-        TextSize = 12,
-        TextColor3 = CONFIG.Text,
-        TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "WalkSpeed",
-        ZIndex = 4,
-    }, wsRow)
-    local wsLabel = make("TextLabel", {
-        Size = UDim2.new(0, 40, 1, 0),
-        Position = UDim2.new(1, -94, 0, 0),
-        BackgroundTransparency = 1,
-        Font = Enum.Font.Code,
-        TextSize = 12,
+        Font = Enum.Font.GothamBold, TextSize = 13,
         TextColor3 = CONFIG.AccentBright,
-        Text = tostring(CONFIG.WalkSpeed),
-        ZIndex = 4,
-    }, wsRow)
-    local minusBtn = make("TextButton", {
-        Size = UDim2.new(0, 22, 0, 20),
-        Position = UDim2.new(1, -48, 0, 3),
-        BackgroundColor3 = CONFIG.Bg2,
-        BorderSizePixel = 0,
-        Font = Enum.Font.Code,
-        TextSize = 14,
-        TextColor3 = CONFIG.Text,
-        Text = "-",
-        AutoButtonColor = false,
-        ZIndex = 5,
-    }, wsRow)
-    local plusBtn = make("TextButton", {
-        Size = UDim2.new(0, 22, 0, 20),
-        Position = UDim2.new(1, -24, 0, 3),
-        BackgroundColor3 = CONFIG.Bg2,
-        BorderSizePixel = 0,
-        Font = Enum.Font.Code,
-        TextSize = 14,
-        TextColor3 = CONFIG.Text,
-        Text = "+",
-        AutoButtonColor = false,
-        ZIndex = 5,
-    }, wsRow)
-    minusBtn.MouseButton1Click:Connect(function()
-        CONFIG.WalkSpeed = math.max(16, CONFIG.WalkSpeed - 4)
-        wsLabel.Text = tostring(CONFIG.WalkSpeed)
-    end)
-    plusBtn.MouseButton1Click:Connect(function()
-        CONFIG.WalkSpeed = math.min(500, CONFIG.WalkSpeed + 4)
-        wsLabel.Text = tostring(CONFIG.WalkSpeed)
-    end)
+        Text = "",
+        Visible = false, ZIndex = 30,
+    }, gui)
+    make("UIStroke", { Color = CONFIG.Accent, Thickness = 1 }, toast)
+    guiRefs.toast = toast
 
-    makeRow(aimPage, "Aim Indicator",  1, function() return CONFIG.ShowAimIndicator end, function(v) CONFIG.ShowAimIndicator = v end)
-    makeRow(aimPage, "Range Ring",     2, function() return CONFIG.ShowRangeRing    end, function(v) CONFIG.ShowRangeRing = v    end)
-    makeRow(aimPage, "Trajectory Arc", 3, function() return CONFIG.ShowTrajectory   end, function(v) CONFIG.ShowTrajectory = v   end)
-    makeRow(aimPage, "Projectile ESP", 4, function() return CONFIG.ShowProjectiles  end, function(v) CONFIG.ShowProjectiles = v  end)
-
-    makeRow(miscPage, "Admin Alert", 1, function() return CONFIG.ShowAdmins  end, function(v) CONFIG.ShowAdmins = v  end)
-    makeRow(miscPage, "Tracers",     2, function() return CONFIG.ShowTracers end, function(v) CONFIG.ShowTracers = v end)
-    makeRow(miscPage, "Radar",       3, function() return CONFIG.ShowRadar   end, function(v) CONFIG.ShowRadar = v   end)
-
+    --==== Minimize/close/drag ====--
     local bIcon = make("TextButton", {
         Size = UDim2.new(0, 34, 0, 34),
         Position = UDim2.new(0, LEFT_X, 0, TOP_Y),
-        BackgroundColor3 = CONFIG.Bg,
-        BorderSizePixel = 0,
-        Font = Enum.Font.GothamBold,
-        TextSize = 16,
-        TextColor3 = CONFIG.AccentBright,
-        Text = "S",
-        AutoButtonColor = false,
-        Visible = false,
-        ZIndex = 10,
+        BackgroundColor3 = CONFIG.Bg, BorderSizePixel = 0,
+        Font = Enum.Font.GothamBold, TextSize = 16,
+        TextColor3 = CONFIG.AccentBright, Text = "S",
+        AutoButtonColor = false, Visible = false, ZIndex = 10,
     }, gui)
-    make("UIStroke", {
-        Color = CONFIG.Accent,
-        Thickness = 1,
-    }, bIcon)
+    make("UIStroke", { Color = CONFIG.Accent, Thickness = 1 }, bIcon)
 
     minBtn.MouseButton1Click:Connect(function() panel.Visible = false; bIcon.Visible = true end)
     bIcon.MouseButton1Click:Connect(function() panel.Visible = true; bIcon.Visible = false end)
@@ -1008,6 +1590,60 @@ local function buildGUI()
     guiRefs.gui = gui
 end
 
+--=============================================================
+-- SUB-PLACE LOADER
+--=============================================================
+local function populateSubPlaces()
+    local holder = guiRefs.subPlaceHolder
+    if not holder then return end
+    local subs = getSubPlaces()
+    if #subs == 0 then
+        make("TextLabel", {
+            Size = UDim2.new(1, 0, 0, 24),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 11,
+            TextColor3 = CONFIG.TextDim,
+            Text = "Failed to load sub-places (check console)",
+            LayoutOrder = 1, ZIndex = 4,
+        }, holder)
+        return
+    end
+    local order = 1
+    for _, sub in ipairs(subs) do
+        if sub.id == game.PlaceId then continue end
+        local name = sub.name or ("Place " .. tostring(sub.id))
+        if #name > 24 then name = name:sub(1, 22) .. "..." end
+        local row = make("Frame", {
+            Size = UDim2.new(1, 0, 0, 26),
+            BackgroundColor3 = CONFIG.Bg1,
+            BorderSizePixel = 0, LayoutOrder = order,
+        }, holder)
+        order = order + 1
+        make("TextLabel", {
+            Size = UDim2.new(1, -70, 1, 0),
+            Position = UDim2.new(0, 10, 0, 0),
+            BackgroundTransparency = 1,
+            Font = Enum.Font.Gotham, TextSize = 12,
+            TextColor3 = CONFIG.Text,
+            TextXAlignment = Enum.TextXAlignment.Left,
+            Text = name, ZIndex = 4,
+        }, row)
+        local btn = make("TextButton", {
+            Size = UDim2.new(0, 56, 0, 20),
+            Position = UDim2.new(1, -60, 0, 3),
+            BackgroundColor3 = CONFIG.Bg2,
+            BorderSizePixel = 0,
+            Font = Enum.Font.GothamBold, TextSize = 10,
+            TextColor3 = CONFIG.Text,
+            Text = "GO",
+            AutoButtonColor = false, ZIndex = 5,
+        }, row)
+        btn.MouseButton1Click:Connect(function()
+            teleportToPlace(sub.id)
+        end)
+    end
+end
+
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.KeyCode == CONFIG.GuiKey and guiRefs.gui then
@@ -1015,28 +1651,65 @@ UserInputService.InputBegan:Connect(function(input, gp)
     end
 end)
 
+--=============================================================
+-- FPS / PING OVERLAY
+--=============================================================
+local function updateFPS(dt)
+    if not CONFIG.ShowFPS then
+        if fpsText.Visible then fpsText.Visible = false end
+        return
+    end
+    fpsFrames = fpsFrames + 1
+    fpsTimeAccum = fpsTimeAccum + dt
+    if fpsTimeAccum >= 0.5 then
+        fpsValue = math.floor(fpsFrames / fpsTimeAccum)
+        fpsFrames = 0
+        fpsTimeAccum = 0
+        local ping = 0
+        pcall(function()
+            ping = math.floor(LocalPlayer:GetNetworkPing() * 1000)
+        end)
+        fpsText.Text = string.format("FPS: %d  |  Ping: %d ms", fpsValue, ping)
+    end
+    if not fpsText.Visible then fpsText.Visible = true end
+end
+
+--=============================================================
+-- MAIN LOOPS
+--=============================================================
 local heavyInterval = 1 / CONFIG.HeavyUpdateHz
 
 RunService.RenderStepped:Connect(function(dt)
     local now = os.clock()
     pcall(renderESP, now)
+    pcall(updateFPS, dt)
     heavyAccum = heavyAccum + dt
     if heavyAccum >= heavyInterval then
         heavyAccum = 0
         pcall(updateRadar)
-        pcall(updateRangeRing)
-        pcall(updateTrajectory)
-        pcall(updateProjectiles)
     end
 end)
 
 RunService.Heartbeat:Connect(function()
     pcall(applyMovement)
+    pcall(applyGravity)
     pcall(updateClimbers)
+    pcall(updateBunnyHop)
+    pcall(updateAntiFling)
+    pcall(updateHitboxes)
 end)
 
-buildRangeRing()
-buildTrajectory()
+--=============================================================
+-- BOOT
+--=============================================================
 buildGUI()
 buildRadar()
-print("[ BeatHub] Loaded — Right Shift toggles the menu.")
+initAntiKick()
+
+LocalPlayer.CharacterAdded:Connect(setupAntiFlingChar)
+if LocalPlayer.Character then setupAntiFlingChar(LocalPlayer.Character) end
+
+task.spawn(populateSubPlaces)
+
+notify("BeatHub loaded")
+print("[BeatHub] Loaded — Right Shift toggles the menu. F to fling.")
