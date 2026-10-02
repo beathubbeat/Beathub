@@ -937,6 +937,8 @@ local function make(class, props, parent)
 end
 
 local function buildGUI()
+    local uiRefreshers = {}
+
     local gui = make("ScreenGui", {
         Name = "BeatHub",
         ResetOnSpawn = false,
@@ -1134,15 +1136,19 @@ local function buildGUI()
             BackgroundTransparency = 1, Text = "",
             AutoButtonColor = false, ZIndex = 6,
         }, row)
-        btn.MouseButton1Click:Connect(function()
-            setter(not getter())
+        local function refreshRow()
             local on = getter()
             bar.BackgroundColor3 = on and CONFIG.Accent or CONFIG.Bg2
             status.Text = on and "ON" or "OFF"
             status.TextColor3 = on and CONFIG.AccentBright or CONFIG.TextDim
+        end
+        btn.MouseButton1Click:Connect(function()
+            setter(not getter())
+            refreshRow()
         end)
         btn.MouseEnter:Connect(function() row.BackgroundColor3 = CONFIG.Bg2 end)
         btn.MouseLeave:Connect(function() row.BackgroundColor3 = CONFIG.Bg1 end)
+        table.insert(uiRefreshers, refreshRow)
     end
 
     local function makeActionRow(parent, label, order, callback)
@@ -1216,14 +1222,18 @@ local function buildGUI()
             TextColor3 = CONFIG.Text, Text = "+",
             AutoButtonColor = false, ZIndex = 5,
         }, row)
+        local function refreshSlider()
+            valLbl.Text = tostring(getter())
+        end
         minusBtn.MouseButton1Click:Connect(function()
             setter(math.max(minV, getter() - step))
-            valLbl.Text = tostring(getter())
+            refreshSlider()
         end)
         plusBtn.MouseButton1Click:Connect(function()
             setter(math.min(maxV, getter() + step))
-            valLbl.Text = tostring(getter())
+            refreshSlider()
         end)
+        table.insert(uiRefreshers, refreshSlider)
     end
 
     --==== ESP ====--
@@ -1338,6 +1348,68 @@ local function buildGUI()
     make("UIStroke", { Color = CONFIG.Accent, Thickness = 1 }, toast)
     guiRefs.toast = toast
 
+    --==== Disable-all helper ====--
+    local function disableAllFeatures()
+        -- ESP / visuals
+        CONFIG.Enabled    = false
+        CONFIG.ShowName   = false
+        CONFIG.ShowHealth = false
+        CONFIG.ShowTool   = false
+        CONFIG.ShowArmor  = false
+        CONFIG.ShowBoxes  = false
+        CONFIG.ShowAdmins = false
+        CONFIG.ShowRadar  = false
+        CONFIG.ShowFPS    = false
+
+        -- movement
+        CONFIG.Noclip          = false
+        CONFIG.MountainClimber = false
+        CONFIG.WallClimber     = false
+        CONFIG.InfiniteJump    = false
+        CONFIG.BunnyHop        = false
+        CONFIG.WalkSpeed       = 17
+        CONFIG.JumpPower       = 50
+        CONFIG.Gravity         = 196.2
+
+        -- combat
+        CONFIG.HitboxEnabled      = false
+        CONFIG.HitboxTeamCheck    = false
+        CONFIG.HitboxSize         = 6
+        CONFIG.HitboxTransparency = 0.7
+
+        -- fling
+        CONFIG.FlingEnabled = false
+
+        -- misc
+        CONFIG.AntiKick  = false
+        CONFIG.AntiFling = false
+        CONFIG.AntiAFK   = false
+        CONFIG.ClickTP   = false
+        if CONFIG.Fullbright then
+            CONFIG.Fullbright = false
+            setFullbright(false)
+        end
+
+        -- restore world state
+        restoreAllHitboxes()
+        hideRadar()
+        if fpsText.Visible then fpsText.Visible = false end
+
+        -- restore character defaults
+        local char = LocalPlayer.Character
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            pcall(function() hum.WalkSpeed = 16 end)
+            pcall(function() hum.UseJumpPower = true; hum.JumpPower = 50 end)
+        end
+        pcall(function() workspace.Gravity = 196.2 end)
+
+        -- refresh all toggle/slider visuals
+        for _, fn in ipairs(uiRefreshers) do pcall(fn) end
+
+        notify("All features disabled")
+    end
+
     --==== Minimize/close/drag ====--
     local bIcon = make("TextButton", {
         Size = UDim2.new(0, 34, 0, 34),
@@ -1351,7 +1423,10 @@ local function buildGUI()
 
     minBtn.MouseButton1Click:Connect(function() panel.Visible = false; bIcon.Visible = true end)
     bIcon.MouseButton1Click:Connect(function() panel.Visible = true; bIcon.Visible = false end)
-    closeBtn.MouseButton1Click:Connect(function() gui.Enabled = false end)
+    closeBtn.MouseButton1Click:Connect(function()
+        disableAllFeatures()
+        gui.Enabled = false
+    end)
 
     minBtn.MouseEnter:Connect(function() minBtn.BackgroundColor3 = CONFIG.Bg2; minBtn.TextColor3 = CONFIG.AccentBright end)
     minBtn.MouseLeave:Connect(function() minBtn.BackgroundColor3 = CONFIG.Bg2; minBtn.TextColor3 = CONFIG.TextDim end)
