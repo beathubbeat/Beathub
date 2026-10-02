@@ -85,7 +85,7 @@ local CONFIG = {
     MaxDistance = 1500,
     RadarSize   = 170,
     RadarRange  = 340,
-    GuiKey      = Enum.KeyCode.RightShift,
+    GuiKey      = Enum.KeyCode.RightControl,
 }
 
 --=============================================================
