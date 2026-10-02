@@ -39,17 +39,9 @@ local CONFIG = {
 
     -- Hitbox widener
     HitboxEnabled  = false,
-    HitboxSize     = 6,        -- studs (X, Y, Z each)
+    HitboxSize     = 5,        -- studs (X, Y, Z each)
     HitboxTransparency = 0.7,
     HitboxTeamCheck = false,   -- only enlarge enemies (not teammates)
-
-    FlingEnabled  = true,
-    FlingKey      = Enum.KeyCode.F,
-    FlingRange    = 30,
-    FlingPower    = 420,
-    FlingLift     = 220,
-    FlingSpin     = 160,
-    FlingCooldown = 0.35,
 
     AntiKick  = false,
     AntiAFK   = true,
@@ -85,7 +77,7 @@ local CONFIG = {
     MaxDistance = 1500,
     RadarSize   = 170,
     RadarRange  = 340,
-    GuiKey      = Enum.KeyCode.RightShift,
+    GuiKey      = Enum.KeyCode.RightControll,
 }
 
 --=============================================================
