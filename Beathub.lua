@@ -52,10 +52,9 @@ local CONFIG = {
     FlingCooldown = 0.35,
 
     AntiKick  = false,
-    AntiFling = false,
     AntiAFK   = true,
-    ClickTP   = false,
     Fullbright = false,
+    PotatoMode = false,
 
     HeavyUpdateHz = 30,
     ToolRefreshHz = 2,
@@ -111,6 +110,15 @@ local fpsFrames, fpsTimeAccum, fpsValue = 0, 0, 0
 -- Hitbox state: [player] = { part = BasePart, originalSize = Vector3, originalTransparency = number }
 local hitboxes = {}
 
+-- Potato mode state
+local potatoState = {
+    enabled       = false,
+    saved         = {},   -- [instance] = { propName = originalValue }
+    conn          = nil,
+    savedLighting = nil,
+    savedQuality  = nil,
+}
+
 -- FPS overlay
 local fpsText = Drawing.new("Text")
 fpsText.Size = 14
@@ -125,7 +133,7 @@ fpsText.Text = "FPS: --  |  Ping: --"
 -- NOTIFY
 --=============================================================
 local function notify(msg)
-    print("[BeatHub] " .. msg)
+    print("[Booga] " .. msg)
     if guiRefs.toast then
         guiRefs.toast.Text = msg
         guiRefs.toast.Visible = true
@@ -604,6 +612,183 @@ local function setFullbright(on)
 end
 
 --=============================================================
+-- POTATO MODE
+--=============================================================
+local POTATO_DISABLE = {
+    "ParticleEmitter","Smoke","Fire","Sparkles","Trail","Beam",
+    "PointLight","SpotLight","SurfaceLight",
+    "BloomEffect","BlurEffect","DepthOfFieldEffect","SunRaysEffect",
+    "ColorCorrectionEffect",
+}
+
+local function potatoSave(inst, prop)
+    local s = potatoState.saved[inst]
+    if not s then s = {}; potatoState.saved[inst] = s end
+    if s[prop] == nil then s[prop] = inst[prop] end
+end
+
+local function potatoApply(inst)
+    if not inst or not inst.Parent then return end
+
+    if inst:IsA("BasePart") then
+        potatoSave(inst, "Material")
+        potatoSave(inst, "Reflectance")
+        potatoSave(inst, "CastShadow")
+        potatoSave(inst, "Color")
+        pcall(function()
+            inst.Material    = Enum.Material.SmoothPlastic
+            inst.Reflectance = 0
+            inst.CastShadow  = false
+            inst.Color       = Color3.fromRGB(160, 130, 100)
+        end)
+        return
+    end
+
+    for _, t in ipairs(POTATO_DISABLE) do
+        if inst:IsA(t) then
+            potatoSave(inst, "Enabled")
+            pcall(function() inst.Enabled = false end)
+            return
+        end
+    end
+
+    if inst:IsA("Atmosphere") then
+        potatoSave(inst, "Density")
+        potatoSave(inst, "Haze")
+        potatoSave(inst, "Glare")
+        pcall(function()
+            inst.Density = 0
+            inst.Haze    = 0
+            inst.Glare   = 0
+        end)
+        return
+    end
+
+    if inst:IsA("Decal") or inst:IsA("Texture") then
+        potatoSave(inst, "Transparency")
+        pcall(function() inst.Transparency = 1 end)
+        return
+    end
+
+    if inst:IsA("LayerCollector") then
+        if inst.Name == "BoogaHub" then return end
+        potatoSave(inst, "Enabled")
+        pcall(function() inst.Enabled = false end)
+        return
+    end
+
+    if inst:IsA("GuiObject") then
+        potatoSave(inst, "Visible")
+        pcall(function() inst.Visible = false end)
+        return
+    end
+end
+
+local function potatoLighting(on)
+    if on then
+        if not potatoState.savedLighting then
+            potatoState.savedLighting = {
+                Brightness     = Lighting.Brightness,
+                Ambient        = Lighting.Ambient,
+                OutdoorAmbient = Lighting.OutdoorAmbient,
+                GlobalShadows  = Lighting.GlobalShadows,
+                FogStart       = Lighting.FogStart,
+                FogEnd         = Lighting.FogEnd,
+                FogColor       = Lighting.FogColor,
+                EnvironmentDiffuseScale  = Lighting.EnvironmentDiffuseScale,
+                EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+            }
+        end
+        Lighting.Brightness     = 1
+        Lighting.Ambient        = Color3.fromRGB(130, 130, 130)
+        Lighting.OutdoorAmbient = Color3.fromRGB(130, 130, 130)
+        Lighting.GlobalShadows  = false
+        Lighting.FogStart       = 0
+        Lighting.FogEnd         = 120
+        Lighting.FogColor       = Color3.fromRGB(130, 130, 130)
+        Lighting.EnvironmentDiffuseScale  = 0
+        Lighting.EnvironmentSpecularScale = 0
+    else
+        local s = potatoState.savedLighting
+        if s then
+            Lighting.Brightness     = s.Brightness
+            Lighting.Ambient        = s.Ambient
+            Lighting.OutdoorAmbient = s.OutdoorAmbient
+            Lighting.GlobalShadows  = s.GlobalShadows
+            Lighting.FogStart       = s.FogStart
+            Lighting.FogEnd         = s.FogEnd
+            Lighting.FogColor       = s.FogColor
+            Lighting.EnvironmentDiffuseScale  = s.EnvironmentDiffuseScale
+            Lighting.EnvironmentSpecularScale = s.EnvironmentSpecularScale
+            potatoState.savedLighting = nil
+        end
+    end
+end
+
+local function potatoQuality(on)
+    local ok, UGS = pcall(function()
+        return UserSettings():GetService("UserGameSettings")
+    end)
+    if not ok or not UGS then return end
+    if on then
+        potatoState.savedQuality = UGS.SavedQualityLevel
+        pcall(function()
+            UGS.SavedQualityLevel = Enum.SavedQualitySetting.QualityLevel1
+        end)
+    else
+        if potatoState.savedQuality then
+            pcall(function()
+                UGS.SavedQualityLevel = potatoState.savedQuality
+            end)
+            potatoState.savedQuality = nil
+        end
+    end
+end
+
+local function potatoEnable()
+    if potatoState.enabled then return end
+    potatoState.enabled = true
+
+    for _, inst in ipairs(workspace:GetDescendants()) do
+        potatoApply(inst)
+    end
+
+    potatoLighting(true)
+    potatoQuality(true)
+
+    potatoState.conn = workspace.DescendantAdded:Connect(function(inst)
+        if not potatoState.enabled then return end
+        potatoApply(inst)
+    end)
+
+    notify("Potato mode ON")
+end
+
+local function potatoDisable()
+    if not potatoState.enabled then return end
+    potatoState.enabled = false
+
+    if potatoState.conn then
+        potatoState.conn:Disconnect()
+        potatoState.conn = nil
+    end
+
+    for inst, props in pairs(potatoState.saved) do
+        if inst and inst.Parent then
+            for prop, val in pairs(props) do
+                pcall(function() inst[prop] = val end)
+            end
+        end
+    end
+    potatoState.saved = {}
+
+    potatoLighting(false)
+    potatoQuality(false)
+
+    notify("Potato mode OFF")
+end
+
+--=============================================================
 -- ANTI-AFK
 --=============================================================
 LocalPlayer.Idled:Connect(function()
@@ -647,54 +832,7 @@ local function initAntiKick()
         setreadonly(mt, true)
     end)
     if not ok then
-        warn("[BeatHub] Anti-Kick hook failed: " .. tostring(err))
-    end
-end
-
---=============================================================
--- ANTI-FLING
---=============================================================
-local MOVER_TYPES = {
-    "BodyAngularVelocity", "BodyVelocity", "BodyForce",
-    "BodyThrust", "BodyPosition", "BodyGyro",
-}
-
-local function setupAntiFlingChar(char)
-    if not char then return end
-    char.DescendantAdded:Connect(function(d)
-        if not CONFIG.AntiFling then return end
-        for _, t in ipairs(MOVER_TYPES) do
-            if d:IsA(t) then
-                task.defer(function()
-                    if d and d.Parent then d:Destroy() end
-                end)
-                return
-            end
-        end
-    end)
-end
-
-local function updateAntiFling()
-    if not CONFIG.AntiFling then return end
-    local char = LocalPlayer.Character
-    if not char then return end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return end
-
-    for _, d in ipairs(char:GetDescendants()) do
-        for _, t in ipairs(MOVER_TYPES) do
-            if d:IsA(t) then
-                d:Destroy()
-                break
-            end
-        end
-    end
-
-    if hrp.AssemblyLinearVelocity.Magnitude > 1000 then
-        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-    end
-    if hrp.AssemblyAngularVelocity.Magnitude > 100 then
-        hrp.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+        warn("[Booga] Anti-Kick hook failed: " .. tostring(err))
     end
 end
 
@@ -732,7 +870,7 @@ local function getSubPlaces()
                 "/places?limit=100&sortOrder=Asc"
     local data = httpGetJson(url)
     if not data or not data.data then
-        warn("[BeatHub] Failed to fetch sub-places. URL tried: " .. url)
+        warn("[Booga] Failed to fetch sub-places. URL tried: " .. url)
         return {}
     end
     return data.data
@@ -912,7 +1050,7 @@ Players.PlayerAdded:Connect(function(p)
         armorCache[p] = nil
         adminCache[p] = nil
         toolCache[p]  = nil
-        restoreHitbox(p)  -- fresh char = fresh parts, will re-apply next frame
+        restoreHitbox(p)
     end)
     if refreshTargetList then refreshTargetList() end
 end)
@@ -940,7 +1078,7 @@ local function buildGUI()
     local uiRefreshers = {}
 
     local gui = make("ScreenGui", {
-        Name = "BeatHub",
+        Name = "BoogaHub",
         ResetOnSpawn = false,
         IgnoreGuiInset = true,
         ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
@@ -988,7 +1126,7 @@ local function buildGUI()
         TextSize = 15,
         TextColor3 = CONFIG.AccentBright,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "BeatHub",
+        Text = "BoogaHub",
         ZIndex = 5,
     }, header)
 
@@ -1000,7 +1138,7 @@ local function buildGUI()
         TextSize = 10,
         TextColor3 = CONFIG.TextDim,
         TextXAlignment = Enum.TextXAlignment.Left,
-        Text = "made by Beat",
+        Text = "made by gage",
         ZIndex = 5,
     }, header)
 
@@ -1183,7 +1321,7 @@ local function buildGUI()
         return row
     end
 
-    local function makeSlider(parent, label, order, minV, maxV, step, getter, setter)
+    local function makeSlider(parent, label, order, minV, maxV, step, getter, setter, formatter)
         local row = make("Frame", {
             Size = UDim2.new(1, 0, 0, 26),
             BackgroundColor3 = CONFIG.Bg1,
@@ -1198,13 +1336,17 @@ local function buildGUI()
             TextXAlignment = Enum.TextXAlignment.Left,
             Text = label, ZIndex = 4,
         }, row)
+        local function fmt(v)
+            if formatter then return formatter(v) end
+            return tostring(v)
+        end
         local valLbl = make("TextLabel", {
             Size = UDim2.new(0, 44, 1, 0),
             Position = UDim2.new(1, -94, 0, 0),
             BackgroundTransparency = 1,
             Font = Enum.Font.Code, TextSize = 12,
             TextColor3 = CONFIG.AccentBright,
-            Text = tostring(getter()), ZIndex = 4,
+            Text = fmt(getter()), ZIndex = 4,
         }, row)
         local minusBtn = make("TextButton", {
             Size = UDim2.new(0, 22, 0, 20),
@@ -1223,7 +1365,7 @@ local function buildGUI()
             AutoButtonColor = false, ZIndex = 5,
         }, row)
         local function refreshSlider()
-            valLbl.Text = tostring(getter())
+            valLbl.Text = fmt(getter())
         end
         minusBtn.MouseButton1Click:Connect(function()
             setter(math.max(minV, getter() - step))
@@ -1243,6 +1385,9 @@ local function buildGUI()
     makeRow(espPage, "Tool",       4, function() return CONFIG.ShowTool   end, function(v) CONFIG.ShowTool = v   end)
     makeRow(espPage, "Armor",      5, function() return CONFIG.ShowArmor  end, function(v) CONFIG.ShowArmor = v  end)
     makeRow(espPage, "Boxes",      6, function() return CONFIG.ShowBoxes  end, function(v) CONFIG.ShowBoxes = v  end)
+    makeSlider(espPage, "Range",   7, 100, 5000, 100,
+        function() return CONFIG.MaxDistance end,
+        function(v) CONFIG.MaxDistance = v end)
 
     --==== MOVE ====--
     makeRow(movePage, "Noclip",           1, function() return CONFIG.Noclip          end, function(v) CONFIG.Noclip = v          end)
@@ -1289,21 +1434,33 @@ local function buildGUI()
             end
         end)
 
-
     --==== MISC ====--
-    makeRow(miscPage, "Admin Alert",     1, function() return CONFIG.ShowAdmins  end, function(v) CONFIG.ShowAdmins = v  end)
-    makeRow(miscPage, "Radar",           2, function() return CONFIG.ShowRadar   end, function(v) CONFIG.ShowRadar = v   end)
-    makeRow(miscPage, "FPS Overlay",     3, function() return CONFIG.ShowFPS     end, function(v) CONFIG.ShowFPS = v     end)
-    makeRow(miscPage, "Anti-Kick",       4, function() return CONFIG.AntiKick    end, function(v) CONFIG.AntiKick = v    end)
-    makeRow(miscPage, "Anti-Fling",      5, function() return CONFIG.AntiFling   end, function(v) CONFIG.AntiFling = v   end)
-    makeRow(miscPage, "Anti-AFK",        6, function() return CONFIG.AntiAFK     end, function(v) CONFIG.AntiAFK = v     end)
-    makeRow(miscPage, "Click Teleport",  7, function() return CONFIG.ClickTP     end, function(v) CONFIG.ClickTP = v     end)
-    makeRow(miscPage, "Fullbright",      8,
+    makeRow(miscPage, "Admin Alert",   1, function() return CONFIG.ShowAdmins  end, function(v) CONFIG.ShowAdmins = v  end)
+    makeRow(miscPage, "Radar",         2, function() return CONFIG.ShowRadar   end, function(v) CONFIG.ShowRadar = v   end)
+    makeRow(miscPage, "FPS Overlay",   3, function() return CONFIG.ShowFPS     end, function(v) CONFIG.ShowFPS = v     end)
+    makeRow(miscPage, "Anti-Kick",     4, function() return CONFIG.AntiKick    end, function(v) CONFIG.AntiKick = v    end)
+    makeRow(miscPage, "Anti-AFK",      5, function() return CONFIG.AntiAFK     end, function(v) CONFIG.AntiAFK = v     end)
+    makeRow(miscPage, "Fullbright",    6,
         function() return CONFIG.Fullbright end,
         function(v) CONFIG.Fullbright = v; setFullbright(v) end)
-    makeActionRow(miscPage, "SERVER HOP",  9,  serverHop)
-    makeActionRow(miscPage, "REJOIN",      10, rejoin)
-    makeActionRow(miscPage, "COPY JOB ID", 11, copyJobId)
+    makeRow(miscPage, "Potato Mode",   7,
+        function() return CONFIG.PotatoMode end,
+        function(v)
+            CONFIG.PotatoMode = v
+            if v then
+                if CONFIG.Fullbright then
+                    CONFIG.Fullbright = false
+                    setFullbright(false)
+                end
+                potatoEnable()
+                for _, fn in ipairs(uiRefreshers) do pcall(fn) end
+            else
+                potatoDisable()
+            end
+        end)
+    makeActionRow(miscPage, "SERVER HOP",  8,  serverHop)
+    makeActionRow(miscPage, "REJOIN",      9,  rejoin)
+    makeActionRow(miscPage, "COPY JOB ID", 10, copyJobId)
 
     do
         local hdr = make("Frame", {
@@ -1377,17 +1534,16 @@ local function buildGUI()
         CONFIG.HitboxSize         = 6
         CONFIG.HitboxTransparency = 0.7
 
-        -- fling
-        CONFIG.FlingEnabled = false
-
         -- misc
-        CONFIG.AntiKick  = false
-        CONFIG.AntiFling = false
-        CONFIG.AntiAFK   = false
-        CONFIG.ClickTP   = false
+        CONFIG.AntiKick   = false
+        CONFIG.AntiAFK    = false
         if CONFIG.Fullbright then
             CONFIG.Fullbright = false
             setFullbright(false)
+        end
+        if CONFIG.PotatoMode then
+            CONFIG.PotatoMode = false
+            potatoDisable()
         end
 
         -- restore world state
@@ -1564,7 +1720,6 @@ RunService.Heartbeat:Connect(function()
     pcall(applyGravity)
     pcall(updateClimbers)
     pcall(updateBunnyHop)
-    pcall(updateAntiFling)
     pcall(updateHitboxes)
 end)
 
@@ -1575,10 +1730,7 @@ buildGUI()
 buildRadar()
 initAntiKick()
 
-LocalPlayer.CharacterAdded:Connect(setupAntiFlingChar)
-if LocalPlayer.Character then setupAntiFlingChar(LocalPlayer.Character) end
-
 task.spawn(populateSubPlaces)
 
-notify("BeatHub loaded")
-print("[BeatHub] Loaded — Right Shift toggles the menu. F to fling.")
+notify("Booga Loaded")
+print("[Booga] Booga Loaded")
