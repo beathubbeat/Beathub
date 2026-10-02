@@ -430,7 +430,7 @@ local function applyMovement()
     local hum = char:FindFirstChildOfClass("Humanoid")
     if not hum then return end
 
-    if CONFIG.WalkSpeed ~= 16 and hum.WalkSpeed ~= CONFIG.WalkSpeed then
+    if CONFIG.WalkSpeed ~= 17 and hum.WalkSpeed ~= CONFIG.WalkSpeed then
         hum.WalkSpeed = CONFIG.WalkSpeed
     end
 
