@@ -38,18 +38,17 @@ local CONFIG = {
     BunnyHop        = false,
 
     -- Hitbox widener
-    HitboxEnabled  = false,
-    HitboxSize     = 6,        -- studs (X, Y, Z each)
-    HitboxTransparency = 0.7,
-    HitboxTeamCheck = false,   -- only enlarge enemies (not teammates)
+    HitboxEnabled      = false,
+    HitboxTransparency = 0.91,   -- fixed (opacity 9)
+    HitboxTeamCheck    = false,
 
-    FlingEnabled  = true,
-    FlingKey      = Enum.KeyCode.F,
-    FlingRange    = 30,
-    FlingPower    = 420,
-    FlingLift     = 220,
-    FlingSpin     = 160,
-    FlingCooldown = 0.35,
+    -- Kill Aura (HitboxSize shares KillAuraRange)
+    KillAuraEnabled      = false,
+    KillAuraRange        = 20,    -- also drives hitbox size (clamped to 13)
+    KillAuraDelay        = 0,
+    KillAuraAutoActivate = true,
+    KillAuraTouchAssist  = true,
+    KillAuraTeamCheck    = true,
 
     AntiKick  = false,
     AntiAFK   = true,
@@ -98,7 +97,7 @@ local radarState = { center = Vector2.new(0,0), half = 0 }
 local guiRefs = {}
 
 local heavyAccum = 0
-local lastFling  = 0
+local auraLastSwing = 0
 
 local targetPlayers  = {}
 local targetListRows = {}
@@ -107,19 +106,17 @@ local refreshTargetList = function() end
 local savedLighting = nil
 local fpsFrames, fpsTimeAccum, fpsValue = 0, 0, 0
 
--- Hitbox state: [player] = { part = BasePart, originalSize = Vector3, originalTransparency = number }
+-- hitboxes[player] = { part = BasePart, originalSize = Vector3, originalTransparency = number, appliedSize = Vector3 }
 local hitboxes = {}
 
--- Potato mode state
 local potatoState = {
     enabled       = false,
-    saved         = {},   -- [instance] = { propName = originalValue }
+    saved         = {},
     conn          = nil,
     savedLighting = nil,
     savedQuality  = nil,
 }
 
--- FPS overlay
 local fpsText = Drawing.new("Text")
 fpsText.Size = 14
 fpsText.Color = Color3.new(1, 1, 1)
@@ -128,6 +125,11 @@ fpsText.OutlineColor = Color3.new(0, 0, 0)
 fpsText.Position = Vector2.new(10, 8)
 fpsText.Visible = false
 fpsText.Text = "FPS: --  |  Ping: --"
+
+-- helper: hitbox size derived from aura range (capped at 13)
+local function hitboxSize()
+    return math.min(CONFIG.KillAuraRange, 13)
+end
 
 --=============================================================
 -- NOTIFY
@@ -494,7 +496,7 @@ local function updateBunnyHop()
 end
 
 --=============================================================
--- HITBOX WIDENER
+-- HITBOX WIDENER  (size driven by KillAuraRange, capped at 13)
 --=============================================================
 local function isEnemy(player)
     if not CONFIG.HitboxTeamCheck then return true end
@@ -511,14 +513,18 @@ local function applyHitbox(player)
     if not hum or hum.Health <= 0 then return end
     if not isEnemy(player) then return end
 
-    -- Prefer HumanoidRootPart — bigger and doesn't rotate with head
     local part = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Head")
     if not part then return end
 
+    local sizeVal = hitboxSize()
+    local wanted = Vector3.new(sizeVal, sizeVal, sizeVal)
+
     local existing = hitboxes[player]
     if existing and existing.part == part then
-        -- Just re-apply size in case game reset it
-        if part.Size ~= existing.appliedSize then
+        if existing.appliedSize ~= wanted then
+            existing.appliedSize = wanted
+            pcall(function() part.Size = wanted end)
+        elseif part.Size ~= existing.appliedSize then
             pcall(function() part.Size = existing.appliedSize end)
         end
         if part.Transparency ~= CONFIG.HitboxTransparency then
@@ -527,14 +533,13 @@ local function applyHitbox(player)
         return
     end
 
-    -- New part — save originals
     hitboxes[player] = {
         part = part,
         originalSize = part.Size,
         originalTransparency = part.Transparency,
-        appliedSize = Vector3.new(CONFIG.HitboxSize, CONFIG.HitboxSize, CONFIG.HitboxSize),
+        appliedSize = wanted,
     }
-    pcall(function() part.Size = hitboxes[player].appliedSize end)
+    pcall(function() part.Size = wanted end)
     pcall(function() part.Transparency = CONFIG.HitboxTransparency end)
 end
 
@@ -567,13 +572,100 @@ local function updateHitboxes()
         end
     end
 
-    -- Restore any player who no longer qualifies (left team, died, etc.)
     for player, rec in pairs(hitboxes) do
         local char = player.Character
         local hum = char and char:FindFirstChildOfClass("Humanoid")
         if not char or not hum or hum.Health <= 0 or not isEnemy(player) then
             restoreHitbox(player)
         end
+    end
+end
+
+--=============================================================
+-- KILL AURA  (Booga Booga: tool lives in Character.Tools folder)
+--=============================================================
+local function getEquippedTool()
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local folder = char:FindFirstChild("Tools")
+    if folder then
+        for _, d in ipairs(folder:GetChildren()) do
+            if d:IsA("Tool") then return d end
+        end
+    end
+    local t = char:FindFirstChildOfClass("Tool")
+    if t then return t end
+    return nil
+end
+
+local function auraGetTarget()
+    local char = LocalPlayer.Character
+    local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    local best, bestDist = nil, CONFIG.KillAuraRange
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer then
+            local teamOk = true
+            if CONFIG.KillAuraTeamCheck then
+                teamOk = (player.Team == nil) or (player.Team ~= LocalPlayer.Team)
+            end
+            if teamOk then
+                local tChar = player.Character
+                local tHum  = tChar and tChar:FindFirstChildOfClass("Humanoid")
+                local tHrp  = tChar and tChar:FindFirstChild("HumanoidRootPart")
+                if tHum and tHrp and tHum.Health > 0 then
+                    local d = (tHrp.Position - hrp.Position).Magnitude
+                    if d < bestDist then
+                        best, bestDist = player, d
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function auraFireTool(tool)
+    pcall(function() tool:Activate() end)
+    pcall(function()
+        if VirtualUser and VirtualUser.Button1Down then
+            VirtualUser:Button1Down(Vector2.new(0, 0))
+            VirtualUser:Button1Up(Vector2.new(0, 0))
+        end
+    end)
+    pcall(function()
+        if typeof(mouse1click) == "function" then mouse1click() end
+    end)
+end
+
+local function updateKillAura()
+    if not CONFIG.KillAuraEnabled then return end
+
+    local tool = getEquippedTool()
+    if not tool then return end
+
+    local target = auraGetTarget()
+    if not target then return end
+
+    local tChar = target.Character
+    local tHrp  = tChar and tChar:FindFirstChild("HumanoidRootPart")
+    if not tHrp then return end
+
+    auraFireTool(tool)
+
+    if CONFIG.KillAuraTouchAssist then
+        local char = LocalPlayer.Character
+        local myHrp = char and char:FindFirstChild("HumanoidRootPart")
+        if myHrp then
+            local delta = tHrp.Position - myHrp.Position
+            local dist  = delta.Magnitude
+            if dist > 4 then
+                local step = math.min(dist - 3.5, 6)
+                myHrp.CFrame = myHrp.CFrame + delta.Unit * step
+            end
+        end
+        auraFireTool(tool)
     end
 end
 
@@ -812,7 +904,6 @@ UserInputService.JumpRequest:Connect(function()
         end)
     end
 end)
-
 
 --=============================================================
 -- ANTI-KICK
@@ -1409,29 +1500,25 @@ local function buildGUI()
     makeRow(combatPage, "Hitbox Widener", 1,
         function() return CONFIG.HitboxEnabled end,
         function(v) CONFIG.HitboxEnabled = v end)
-    makeRow(combatPage, "Team Check",     2,
+    makeRow(combatPage, "HB Team Check", 2,
         function() return CONFIG.HitboxTeamCheck end,
         function(v) CONFIG.HitboxTeamCheck = v end)
-    makeSlider(combatPage, "Hitbox Size", 3, 2, 20, 1,
-        function() return CONFIG.HitboxSize end,
+
+    makeRow(combatPage, "Kill Aura",       3,
+        function() return CONFIG.KillAuraEnabled end,
+        function(v) CONFIG.KillAuraEnabled = v end)
+    makeRow(combatPage, "Aura Touch Hit",  4,
+        function() return CONFIG.KillAuraTouchAssist end,
+        function(v) CONFIG.KillAuraTouchAssist = v end)
+    makeRow(combatPage, "Aura Team Check", 5,
+        function() return CONFIG.KillAuraTeamCheck end,
+        function(v) CONFIG.KillAuraTeamCheck = v end)
+    makeSlider(combatPage, "Hitbox/Aura Range", 6, 5, 100, 5,
+        function() return CONFIG.KillAuraRange end,
+        function(v) CONFIG.KillAuraRange = v end,
         function(v)
-            CONFIG.HitboxSize = v
-            -- Force re-apply with new size
-            for player, rec in pairs(hitboxes) do
-                if rec and rec.part and rec.part.Parent then
-                    rec.appliedSize = Vector3.new(v, v, v)
-                end
-            end
-        end)
-    makeSlider(combatPage, "Hitbox Opacity", 4, 0, 100, 10,
-        function() return math.floor((1 - CONFIG.HitboxTransparency) * 100) end,
-        function(v)
-            CONFIG.HitboxTransparency = 1 - (v / 100)
-            for _, rec in pairs(hitboxes) do
-                if rec and rec.part and rec.part.Parent then
-                    pcall(function() rec.part.Transparency = CONFIG.HitboxTransparency end)
-                end
-            end
+            local hb = math.min(v, 13)
+            return v .. " (" .. hb .. ")"
         end)
 
     --==== MISC ====--
@@ -1491,7 +1578,6 @@ local function buildGUI()
 
     guiRefs.subPlaceHolder = subPlaceHolder
 
-    --==== Toast ====--
     local toast = make("TextLabel", {
         Size = UDim2.new(0, 300, 0, 28),
         Position = UDim2.new(0.5, -150, 0, 40),
@@ -1505,9 +1591,7 @@ local function buildGUI()
     make("UIStroke", { Color = CONFIG.Accent, Thickness = 1 }, toast)
     guiRefs.toast = toast
 
-    --==== Disable-all helper ====--
     local function disableAllFeatures()
-        -- ESP / visuals
         CONFIG.Enabled    = false
         CONFIG.ShowName   = false
         CONFIG.ShowHealth = false
@@ -1518,7 +1602,6 @@ local function buildGUI()
         CONFIG.ShowRadar  = false
         CONFIG.ShowFPS    = false
 
-        -- movement
         CONFIG.Noclip          = false
         CONFIG.MountainClimber = false
         CONFIG.WallClimber     = false
@@ -1528,13 +1611,15 @@ local function buildGUI()
         CONFIG.JumpPower       = 50
         CONFIG.Gravity         = 196.2
 
-        -- combat
         CONFIG.HitboxEnabled      = false
         CONFIG.HitboxTeamCheck    = false
-        CONFIG.HitboxSize         = 6
-        CONFIG.HitboxTransparency = 0.7
+        CONFIG.HitboxTransparency = 0.91
 
-        -- misc
+        CONFIG.KillAuraEnabled     = false
+        CONFIG.KillAuraTouchAssist = true
+        CONFIG.KillAuraTeamCheck   = true
+        CONFIG.KillAuraRange       = 20
+
         CONFIG.AntiKick   = false
         CONFIG.AntiAFK    = false
         if CONFIG.Fullbright then
@@ -1546,12 +1631,10 @@ local function buildGUI()
             potatoDisable()
         end
 
-        -- restore world state
         restoreAllHitboxes()
         hideRadar()
         if fpsText.Visible then fpsText.Visible = false end
 
-        -- restore character defaults
         local char = LocalPlayer.Character
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
         if hum then
@@ -1560,13 +1643,11 @@ local function buildGUI()
         end
         pcall(function() workspace.Gravity = 196.2 end)
 
-        -- refresh all toggle/slider visuals
         for _, fn in ipairs(uiRefreshers) do pcall(fn) end
 
         notify("All features disabled")
     end
 
-    --==== Minimize/close/drag ====--
     local bIcon = make("TextButton", {
         Size = UDim2.new(0, 34, 0, 34),
         Position = UDim2.new(0, LEFT_X, 0, TOP_Y),
@@ -1577,8 +1658,22 @@ local function buildGUI()
     }, gui)
     make("UIStroke", { Color = CONFIG.Accent, Thickness = 1 }, bIcon)
 
-    minBtn.MouseButton1Click:Connect(function() panel.Visible = false; bIcon.Visible = true end)
-    bIcon.MouseButton1Click:Connect(function() panel.Visible = true; bIcon.Visible = false end)
+    local function minimize()
+        panel.Visible = false
+        bIcon.Visible = true
+    end
+    local function restore()
+        panel.Visible = true
+        bIcon.Visible = false
+    end
+
+    guiRefs.panel    = panel
+    guiRefs.bIcon    = bIcon
+    guiRefs.minimize = minimize
+    guiRefs.restore  = restore
+
+    minBtn.MouseButton1Click:Connect(minimize)
+    bIcon.MouseButton1Click:Connect(restore)
     closeBtn.MouseButton1Click:Connect(function()
         disableAllFeatures()
         gui.Enabled = false
@@ -1596,19 +1691,38 @@ local function buildGUI()
             drag = true; dStart = input.Position; pStart = panel.Position
         end
     end)
+
+    local bDrag, bStart, bPos
+    bIcon.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            bDrag = true; bStart = input.Position; bPos = bIcon.Position
+        end
+    end)
+
     UserInputService.InputChanged:Connect(function(input)
-        if drag and (input.UserInputType == Enum.UserInputType.MouseMovement
-        or input.UserInputType == Enum.UserInputType.Touch) then
+        if input.UserInputType ~= Enum.UserInputType.MouseMovement
+        and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
+        end
+        if drag then
             local d = input.Position - dStart
             local np = UDim2.new(pStart.X.Scale, pStart.X.Offset + d.X,
                                  pStart.Y.Scale, pStart.Y.Offset + d.Y)
-            panel.Position = np; bIcon.Position = np
+            panel.Position = np
+            bIcon.Position = np
+        elseif bDrag then
+            local d = input.Position - bStart
+            bIcon.Position = UDim2.new(bPos.X.Scale, bPos.X.Offset + d.X,
+                                       bPos.Y.Scale, bPos.Y.Offset + d.Y)
         end
     end)
+
     UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
         or input.UserInputType == Enum.UserInputType.Touch then
             drag = false
+            bDrag = false
         end
     end)
 
@@ -1671,8 +1785,12 @@ end
 
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
-    if input.KeyCode == CONFIG.GuiKey and guiRefs.gui then
-        guiRefs.gui.Enabled = not guiRefs.gui.Enabled
+    if input.KeyCode == CONFIG.GuiKey and guiRefs.panel then
+        if guiRefs.panel.Visible then
+            guiRefs.minimize()
+        else
+            guiRefs.restore()
+        end
     end
 end)
 
@@ -1721,6 +1839,7 @@ RunService.Heartbeat:Connect(function()
     pcall(updateClimbers)
     pcall(updateBunnyHop)
     pcall(updateHitboxes)
+    pcall(updateKillAura)
 end)
 
 --=============================================================
